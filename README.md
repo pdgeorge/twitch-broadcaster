@@ -47,7 +47,12 @@ Messages published to RabbitMQ use the Twitch EventSub type as the `properties.t
 
 ## Consuming events with `background.py`
 
-`background.py` is a lightweight example that binds a queue to the `twitch_events` fanout exchange and prints every event it receives.
+`background.py` is a lightweight example that binds a queue to the `twitch_events` fanout exchange. It ships with helper handlers so you can pick which events to print:
+
+- `handle_all_events` (commented out by default) for every Twitch event.
+- `handle_channel_points_only` for only `channel.channel_points_custom_reward_redemption.add`.
+- `handle_chat_only` for only `channel.chat.message` events.
+- `handle_chat_and_rewards` (default) for both chat messages and channel point redemptions.
 
 ```
 pip install pika

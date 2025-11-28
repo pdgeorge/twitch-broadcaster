@@ -132,6 +132,10 @@ class TwitchEventSubClient:
             "broadcaster_user_id": self.channel_id,
             "moderator_user_id": self.channel_id,
         }
+        chat_condition = {
+            "broadcaster_user_id": self.channel_id,
+            "user_id": self.channel_id,
+        }
         return [
             {"type": "channel.update", "version": "2", "condition": broadcaster_condition},
             {"type": "channel.follow", "version": "2", "condition": {"broadcaster_user_id": self.channel_id, "moderator_user_id": self.channel_id}},
@@ -170,9 +174,10 @@ class TwitchEventSubClient:
             {"type": "channel.shield_mode.begin", "version": "1", "condition": moderator_condition},
             {"type": "channel.shield_mode.end", "version": "1", "condition": moderator_condition},
             {"type": "channel.shoutout.create", "version": "1", "condition": moderator_condition},
-            {"type": "channel.shoutout.receive", "version": "1", "condition": broadcaster_condition},
+            {"type": "channel.shoutout.receive", "version": "1", "condition": moderator_condition},
             {"type": "channel.vip.add", "version": "1", "condition": moderator_condition},
             {"type": "channel.vip.remove", "version": "1", "condition": moderator_condition},
+            {"type": "channel.chat.message", "version": "1", "condition": chat_condition},
         ]
 
     async def subscribe_all(self, session_id: str) -> None:
