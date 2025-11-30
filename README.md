@@ -35,6 +35,7 @@ RABBITMQ_EXCHANGE=twitch_events
    - `twitch_broadcaster` is a RabbitMQ broker with the management UI exposed on port `15672`.
    - `twitch_receiver` connects to Twitch EventSub over WebSockets, subscribes to all channel events for `CHANNEL_ID`, and publishes them to the `twitch_events` exchange in RabbitMQ.
    - A named Docker volume (`tokens`) is mounted at `/data` inside `twitch_receiver` so refreshed tokens persist across restarts.
+   - `overlay_controller` consumes chat messages from RabbitMQ, serves the overlay assets from `overlay/`, and exposes a WebSocket endpoint at `/ws/overlay` for the overlay page.
 
 2. (Optional) Tail the receiver logs:
    ```
@@ -66,6 +67,15 @@ Environment variables you can override:
 - `QUEUE_NAME` (default `twitch_event_printer`)
 
 With the Docker Compose stack running, `background.py` will start printing JSON payloads for each Twitch channel event.
+
+## Chat overlay (OBS-friendly)
+
+An overlay controller service streams `channel.chat.message` events to browser clients.
+
+- Overlay assets live in `overlay/` (`index.html`, `overlay.css`, `overlay.js`). The CSS positions the chat box (top/left) so you can adjust placement without code changes.
+- The Go backend lives in `overlay-controller/` and listens on `OVERLAY_HTTP_PORT` (default `8080`). The overlay is served at `/` and the WebSocket endpoint is `/ws/overlay`.
+- When running via Docker Compose, the overlay is available at `http://localhost:${OVERLAY_HTTP_PORT}`. Add this URL as a browser source in OBS with a transparent background.
+- Environment variables for the overlay controller: `RABBITMQ_URL`, `RABBITMQ_EXCHANGE`, `OVERLAY_QUEUE`, `OVERLAY_HTTP_PORT`, `OVERLAY_STATIC_DIR`.
 
 ## Notes on long-running operation
 

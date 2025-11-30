@@ -1,0 +1,37 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+}
+
+#overlay-root {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+}
+
+#chat-box {
+  position: absolute;
+  top: 5vh;      /* configurable */
+  left: 5vw;     /* configurable */
+  max-width: 40vw;
+  max-height: 90vh;
+  overflow: hidden;
+  font-family: monospace;
+  font-size: 16px;
+  color: #00ff00;         /* green terminal text, can be changed later */
+}
+
+.chat-line {
+  white-space: pre-wrap;
+  margin-bottom: 4px;
+}
+
+.username {
+  font-weight: bold;
+}
+
+.badges {
+  margin-right: 4px;
+}
