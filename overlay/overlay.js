@@ -1,5 +1,8 @@
 (function () {
   const chatBox = document.getElementById('chat-box');
+  const otherBox = document.getElementById('other-box');
+  let otherBaseHTML = '';
+  let pongActive = false;
 
   const emoteStores = {
     bttv: { global: new Map(), channels: new Map(), globalLoaded: false },
@@ -25,6 +28,10 @@
     } else {
       chatBox.appendChild(line);
     }
+  }
+
+  function setOtherContent(html) {
+    otherBox.innerHTML = `<div class="other-content">${html || ''}</div>`;
   }
 
   async function loadGlobalEmotes() {
@@ -206,6 +213,30 @@
         if (payload.type === 'chat.message') {
           await ensureChannelEmotes(payload.channel_id);
           appendChatLine(renderMessage(payload));
+          return;
+        }
+
+        if (payload.type === 'other.update') {
+          if (payload.mode === 'base') {
+            otherBaseHTML = payload.html || '';
+            setOtherContent(payload.html || '');
+          } else if (payload.mode === 'announcement') {
+            setOtherContent(payload.html || '');
+          } else if (payload.mode === 'force_restore' || payload.mode === 'base_restore') {
+            setOtherContent(payload.html || otherBaseHTML);
+          }
+          pongActive = false;
+          return;
+        }
+
+        if (payload.type === 'other.pong_start') {
+          pongActive = true;
+          setOtherContent(payload.html || '');
+          return;
+        }
+
+        if (payload.type === 'other.pong_frame' && pongActive) {
+          setOtherContent(payload.html || '');
         }
       } catch (err) {
         console.error('Failed to parse message', err);

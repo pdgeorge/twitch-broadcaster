@@ -23,6 +23,46 @@ html, body {
   color: #00ff00;
 }
 
+.other-box {
+  position: absolute;
+  left: 727px;
+  top: 918px;
+  width: 1160px;
+  height: 148px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-family: 'Inter', sans-serif;
+  color: #ffffff;
+  font-size: clamp(16px, 1.6vw, 28px);
+  padding: 8px 16px;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.other-box .other-content {
+  width: 100%;
+  max-height: 100%;
+  display: inline-block;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.other-box h1,
+.other-box h2,
+.other-box h3,
+.other-box p {
+  margin: 0.2em 0;
+}
+
+.other-box .pong-frame {
+  margin: 0;
+  font-family: 'IBM Plex Mono', 'SFMono-Regular', Menlo, Monaco, Consolas, monospace;
+  font-size: 18px;
+  line-height: 1.1;
+}
+
 .chat-line {
   white-space: pre-wrap;
   margin-bottom: 4px;
