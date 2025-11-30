@@ -13,14 +13,14 @@ html, body {
 
 #chat-box {
   position: absolute;
-  top: 16px;      /* configurable */
-  left: 16px;     /* configurable */
+  top: 20px;
+  left: 20px;
   width: 330px;
-  max-height: 90vh;
+  max-height: 64vh;
   overflow: hidden;
   font-family: monospace;
   font-size: 16px;
-  color: #00ff00;         /* green terminal text, can be changed later */
+  color: #00ff00;
 }
 
 .chat-line {
