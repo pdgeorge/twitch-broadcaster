@@ -56,6 +56,13 @@ html, body {
   margin: 0.2em 0;
 }
 
+.other-box .pong-frame {
+  margin: 0;
+  font-family: 'IBM Plex Mono', 'SFMono-Regular', Menlo, Monaco, Consolas, monospace;
+  font-size: 18px;
+  line-height: 1.1;
+}
+
 .chat-line {
   white-space: pre-wrap;
   margin-bottom: 4px;

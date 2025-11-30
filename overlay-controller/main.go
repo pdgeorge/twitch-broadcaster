@@ -132,7 +132,7 @@ func (h *overlayHub) handleWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func newOtherManager(hub *overlayHub) *otherManager {
-	return &otherManager{hub: hub, pongInitialMessage: "<pre>Starting pong...</pre>"}
+	return &otherManager{hub: hub, pongInitialMessage: "<pre class=\"pong-frame\">Starting pong...</pre>"}
 }
 
 func (o *otherManager) send(obj any) {
@@ -218,7 +218,7 @@ func (o *otherManager) runPong(stopChan chan struct{}, duration time.Duration) {
 	defer ticker.Stop()
 
 	width := 28
-	height := 8
+	height := 6
 	paddleSize := 3
 	leftX, rightX := 0, width-1
 
@@ -254,7 +254,7 @@ func (o *otherManager) runPong(stopChan chan struct{}, duration time.Duration) {
 		}
 
 		var sb strings.Builder
-		sb.WriteString("<pre>")
+		sb.WriteString("<pre class=\"pong-frame\">")
 		for _, row := range grid {
 			sb.WriteString(string(row))
 			sb.WriteByte('\n')
