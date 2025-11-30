@@ -214,21 +214,50 @@ func (o *otherManager) startPong(duration time.Duration) {
 }
 
 func (o *otherManager) runPong(stopChan chan struct{}, duration time.Duration) {
-	ticker := time.NewTicker(250 * time.Millisecond)
+	ticker := time.NewTicker(180 * time.Millisecond)
 	defer ticker.Stop()
 
-	width := 40
-	position := 0
-	direction := 1
+	width := 28
+	height := 8
+	paddleSize := 3
+	leftX, rightX := 0, width-1
+
+	ballX, ballY := width/2, height/2
+	dx, dy := 1, 1
+
+	leftY, rightY := height/2, height/2
+	leftDir, rightDir := 1, -1
+
 	deadline := time.After(duration)
 
-	render := func(pos int) string {
+	render := func(ballX, ballY, leftY, rightY int) string {
+		grid := make([][]rune, height)
+		for i := 0; i < height; i++ {
+			row := make([]rune, width)
+			for j := 0; j < width; j++ {
+				row[j] = ' '
+			}
+			grid[i] = row
+		}
+
+		for offset := -1; offset <= 1; offset++ {
+			if y := leftY + offset; y >= 0 && y < height {
+				grid[y][leftX] = '|'
+			}
+			if y := rightY + offset; y >= 0 && y < height {
+				grid[y][rightX] = '|'
+			}
+		}
+
+		if ballY >= 0 && ballY < height && ballX >= 0 && ballX < width {
+			grid[ballY][ballX] = 'O'
+		}
+
 		var sb strings.Builder
 		sb.WriteString("<pre>")
-		sb.WriteString(strings.Repeat(" ", pos))
-		sb.WriteString("O")
-		if pos < width {
-			sb.WriteString(strings.Repeat(" ", width-pos))
+		for _, row := range grid {
+			sb.WriteString(string(row))
+			sb.WriteByte('\n')
 		}
 		sb.WriteString("</pre>")
 		return sb.String()
@@ -237,15 +266,60 @@ func (o *otherManager) runPong(stopChan chan struct{}, duration time.Duration) {
 	for {
 		select {
 		case <-ticker.C:
-			position += direction
-			if position <= 0 {
-				position = 0
-				direction = 1
-			} else if position >= width {
-				position = width
-				direction = -1
+			leftY += leftDir
+			if leftY <= 1 {
+				leftY = 1
+				leftDir = 1
+			} else if leftY >= height-2 {
+				leftY = height - 2
+				leftDir = -1
 			}
-			o.send(map[string]any{"type": "other.pong_frame", "html": render(position)})
+
+			rightY += rightDir
+			if rightY <= 1 {
+				rightY = 1
+				rightDir = 1
+			} else if rightY >= height-2 {
+				rightY = height - 2
+				rightDir = -1
+			}
+
+			nextX := ballX + dx
+			nextY := ballY + dy
+
+			if nextY < 0 || nextY >= height {
+				dy = -dy
+				nextY = ballY + dy
+			}
+
+			if nextX <= leftX {
+				if abs(nextY-leftY) <= paddleSize/2 {
+					dx = 1
+					if nextY < leftY {
+						dy = -1
+					} else if nextY > leftY {
+						dy = 1
+					}
+				} else {
+					dx = 1
+				}
+				nextX = ballX + dx
+			} else if nextX >= rightX {
+				if abs(nextY-rightY) <= paddleSize/2 {
+					dx = -1
+					if nextY < rightY {
+						dy = -1
+					} else if nextY > rightY {
+						dy = 1
+					}
+				} else {
+					dx = -1
+				}
+				nextX = ballX + dx
+			}
+
+			ballX, ballY = nextX, nextY
+			o.send(map[string]any{"type": "other.pong_frame", "html": render(ballX, ballY, leftY, rightY)})
 		case <-deadline:
 			o.stopPong(stopChan)
 			return
@@ -565,6 +639,13 @@ func messageTextFromEvent(event map[string]any) string {
 	return ""
 }
 
+func abs(i int) int {
+	if i < 0 {
+		return -i
+	}
+	return i
+}
+
 func markdownToHTML(input string) string {
 	var buf bytes.Buffer
 	if err := goldmark.Convert([]byte(input), &buf); err != nil {
@@ -572,6 +653,13 @@ func markdownToHTML(input string) string {
 		return html.EscapeString(input)
 	}
 	return buf.String()
+}
+
+func normalizeMarkdownInput(input string) string {
+	normalized := strings.ReplaceAll(input, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\\r\\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\\n", "\n")
+	return normalized
 }
 
 func handleChatEvent(event map[string]any, hub *overlayHub, other *otherManager) {
@@ -589,7 +677,7 @@ func handleChatEvent(event map[string]any, hub *overlayHub, other *otherManager)
 	if isAuthorizedForOther(event) {
 		if strings.HasPrefix(lower, "!other ") {
 			content := strings.TrimSpace(messageText[len("!other "):])
-			other.setBase(markdownToHTML(content))
+			other.setBase(markdownToHTML(normalizeMarkdownInput(content)))
 		} else if strings.EqualFold(strings.TrimSpace(messageText), "!fire") {
 			other.cancelAnnouncement()
 		}
@@ -625,7 +713,7 @@ func handleRedeemEvent(event map[string]any, other *otherManager) {
 	}
 
 	userInput := firstString(event["user_input"], "")
-	other.startAnnouncement(markdownToHTML(userInput), 5*time.Minute)
+	other.startAnnouncement(markdownToHTML(normalizeMarkdownInput(userInput)), 5*time.Minute)
 }
 
 func isAuthorizedForOther(event map[string]any) bool {
