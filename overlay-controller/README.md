@@ -33,11 +33,17 @@ WebSocket payloads use this shape:
 ```json
 {
   "type": "chat.message",
-  "badges": ["broadcaster"],
   "username": "example_user",
-  "message": "hello world",
-  "message_html": "<span class='badges'>[broadcaster]</span> <span class='username'>example_user</span>: hello world"
+  "channel_id": "12345",
+  "channel_login": "example_user",
+  "fragments": [
+    { "type": "text", "text": "hello" },
+    { "type": "emote", "text": "Kappa", "emote_url": "https://static-cdn.jtvnw.net/emoticons/v2/25/static/dark/2.0" }
+  ],
+  "message": "hello Kappa",
+  "message_html": "<span class='username'>example_user</span>: hello <img class='emote' src='...'>"
 }
 ```
 
-Badges are optional and derived from the EventSub payload; message and username are HTML-escaped for display safety.
+- `message_html` is pre-rendered with Twitch emotes for compatibility.
+- `fragments` and `message` allow the overlay JS to swap in BTTV/FFZ/7TV emotes client-side while reusing Twitch emote URLs.

@@ -26,12 +26,21 @@ type config struct {
 	staticDir      string
 }
 
+type chatFragment struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	EmoteID  string `json:"emote_id,omitempty"`
+	EmoteURL string `json:"emote_url,omitempty"`
+}
+
 type chatMessage struct {
-	Type        string   `json:"type"`
-	Badges      []string `json:"badges"`
-	Username    string   `json:"username"`
-	Message     string   `json:"message"`
-	MessageHTML string   `json:"message_html"`
+	Type         string         `json:"type"`
+	Username     string         `json:"username"`
+	Message      string         `json:"message"`
+	MessageHTML  string         `json:"message_html"`
+	Fragments    []chatFragment `json:"fragments,omitempty"`
+	ChannelLogin string         `json:"channel_login,omitempty"`
+	ChannelID    string         `json:"channel_id,omitempty"`
 }
 
 type eventPayload struct {
@@ -293,45 +302,102 @@ func formatChat(event map[string]any) *chatMessage {
 		return nil
 	}
 
-	badges := extractBadges(event)
-	badgeText := strings.Join(badges, " ")
-	badgeHTML := ""
-	if badgeText != "" {
-		badgeHTML = fmt.Sprintf("<span class='badges'>[%s]</span> ", html.EscapeString(badgeText))
-	}
+	fragments := extractFragments(event)
+	channelLogin := firstString(event["broadcaster_user_login"], event["chatter_user_login"], event["broadcaster_user_name"], event["chatter_user_name"], "")
+	channelID := firstString(event["broadcaster_user_id"], event["chatter_user_id"], "")
 
 	msg := &chatMessage{
-		Type:        "chat.message",
-		Badges:      badges,
-		Username:    username,
-		Message:     messageText,
-		MessageHTML: fmt.Sprintf("%s<span class='username'>%s</span>: %s", badgeHTML, html.EscapeString(username), html.EscapeString(messageText)),
+		Type:         "chat.message",
+		Username:     username,
+		Message:      messageText,
+		Fragments:    fragments,
+		ChannelLogin: channelLogin,
+		ChannelID:    channelID,
 	}
+
+	msg.MessageHTML = renderHTML(msg)
 	return msg
 }
 
-func extractBadges(event map[string]any) []string {
-	badgesVal, ok := event["badges"]
+func extractFragments(event map[string]any) []chatFragment {
+	msgVal, ok := event["message"].(map[string]any)
 	if !ok {
 		return nil
 	}
-	badgesSlice, ok := badgesVal.([]any)
+
+	fragVal, ok := msgVal["fragments"]
 	if !ok {
 		return nil
 	}
-	var badges []string
-	for _, b := range badgesSlice {
-		if badgeMap, ok := b.(map[string]any); ok {
-			if setID, ok := badgeMap["set_id"].(string); ok && setID != "" {
-				badges = append(badges, setID)
+	fragSlice, ok := fragVal.([]any)
+	if !ok {
+		return nil
+	}
+
+	var frags []chatFragment
+	for _, raw := range fragSlice {
+		fragMap, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		typeVal := firstString(fragMap["type"], "")
+		text := firstString(fragMap["text"], "")
+		if typeVal == "text" {
+			frags = append(frags, chatFragment{Type: "text", Text: text})
+			continue
+		}
+
+		if typeVal == "emote" {
+			emoteData, _ := fragMap["emote"].(map[string]any)
+			emoteID := firstString(emoteData["id"], "")
+			format := pickEmoteFormat(emoteData["format"])
+			if emoteID != "" {
+				emoteURL := fmt.Sprintf("https://static-cdn.jtvnw.net/emoticons/v2/%s/%s/dark/2.0", emoteID, format)
+				frags = append(frags, chatFragment{Type: "emote", Text: text, EmoteID: emoteID, EmoteURL: emoteURL})
 				continue
-			}
-			if id, ok := badgeMap["id"].(string); ok && id != "" {
-				badges = append(badges, id)
 			}
 		}
 	}
-	return badges
+	return frags
+}
+
+func pickEmoteFormat(v any) string {
+	formats, ok := v.([]any)
+	if !ok {
+		return "static"
+	}
+	for _, f := range formats {
+		if s, ok := f.(string); ok {
+			if s == "animated" {
+				return s
+			}
+		}
+	}
+	return "static"
+}
+
+func renderHTML(msg *chatMessage) string {
+	var parts []string
+	parts = append(parts, fmt.Sprintf("<span class='username'>%s</span>:", html.EscapeString(msg.Username)))
+
+	if len(msg.Fragments) > 0 {
+		for _, f := range msg.Fragments {
+			switch f.Type {
+			case "text":
+				parts = append(parts, fmt.Sprintf(" <span class='text'>%s</span>", html.EscapeString(f.Text)))
+			case "emote":
+				if f.EmoteURL != "" {
+					parts = append(parts, fmt.Sprintf(" <img class='emote' src='%s' alt='%s' />", html.EscapeString(f.EmoteURL), html.EscapeString(f.Text)))
+				} else {
+					parts = append(parts, fmt.Sprintf(" %s", html.EscapeString(f.Text)))
+				}
+			}
+		}
+	} else if msg.Message != "" {
+		parts = append(parts, fmt.Sprintf(" <span class='text'>%s</span>", html.EscapeString(msg.Message)))
+	}
+
+	return strings.TrimSpace(strings.Join(parts, ""))
 }
 
 func firstString(values ...any) string {
