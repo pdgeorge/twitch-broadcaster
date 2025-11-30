@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/yuin/goldmark"
 )
 
 type config struct {
@@ -61,6 +63,15 @@ func newOverlayHub() *overlayHub {
 		clients:   make(map[*websocket.Conn]struct{}),
 		broadcast: make(chan []byte, 128),
 	}
+}
+
+type otherManager struct {
+	mu                 sync.Mutex
+	hub                *overlayHub
+	baseHTML           string
+	announcementTimer  *time.Timer
+	pongStop           chan struct{}
+	pongInitialMessage string
 }
 
 func (h *overlayHub) add(conn *websocket.Conn) {
@@ -120,15 +131,241 @@ func (h *overlayHub) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func newOtherManager(hub *overlayHub) *otherManager {
+	return &otherManager{hub: hub, pongInitialMessage: "<pre>Starting pong...</pre>"}
+}
+
+func (o *otherManager) send(obj any) {
+	data, err := json.Marshal(obj)
+	if err != nil {
+		log.Printf("failed to encode other payload: %v", err)
+		return
+	}
+	select {
+	case o.hub.broadcast <- data:
+	default:
+		log.Print("dropping other payload: broadcast channel full")
+	}
+}
+
+func (o *otherManager) setBase(html string) {
+	o.mu.Lock()
+	o.baseHTML = html
+	o.mu.Unlock()
+	o.send(map[string]any{"type": "other.update", "mode": "base", "html": html})
+}
+
+func (o *otherManager) startAnnouncement(html string, duration time.Duration) {
+	o.mu.Lock()
+	if o.announcementTimer != nil {
+		o.announcementTimer.Stop()
+	}
+	o.announcementTimer = time.AfterFunc(duration, func() {
+		o.restoreBase("base_restore")
+	})
+	o.mu.Unlock()
+
+	o.send(map[string]any{
+		"type":             "other.update",
+		"mode":             "announcement",
+		"html":             html,
+		"duration_seconds": int(duration.Seconds()),
+	})
+}
+
+func (o *otherManager) cancelAnnouncement() {
+	o.mu.Lock()
+	if o.announcementTimer != nil {
+		o.announcementTimer.Stop()
+		o.announcementTimer = nil
+	}
+	o.mu.Unlock()
+	o.restoreBase("force_restore")
+}
+
+func (o *otherManager) restoreBase(mode string) {
+	o.mu.Lock()
+	base := o.baseHTML
+	o.mu.Unlock()
+	o.send(map[string]any{"type": "other.update", "mode": mode, "html": base})
+}
+
+func (o *otherManager) startPong(duration time.Duration) {
+	o.mu.Lock()
+	if o.pongStop != nil {
+		o.mu.Unlock()
+		return
+	}
+	if o.announcementTimer != nil {
+		o.announcementTimer.Stop()
+		o.announcementTimer = nil
+	}
+	stopChan := make(chan struct{})
+	o.pongStop = stopChan
+	o.mu.Unlock()
+
+	o.send(map[string]any{
+		"type":             "other.pong_start",
+		"duration_seconds": int(duration.Seconds()),
+		"html":             o.pongInitialMessage,
+	})
+
+	go o.runPong(stopChan, duration)
+}
+
+func (o *otherManager) runPong(stopChan chan struct{}, duration time.Duration) {
+	ticker := time.NewTicker(180 * time.Millisecond)
+	defer ticker.Stop()
+
+	width := 28
+	height := 8
+	paddleSize := 3
+	leftX, rightX := 0, width-1
+
+	ballX, ballY := width/2, height/2
+	dx, dy := 1, 1
+
+	leftY, rightY := height/2, height/2
+	leftDir, rightDir := 1, -1
+
+	deadline := time.After(duration)
+
+	render := func(ballX, ballY, leftY, rightY int) string {
+		grid := make([][]rune, height)
+		for i := 0; i < height; i++ {
+			row := make([]rune, width)
+			for j := 0; j < width; j++ {
+				row[j] = ' '
+			}
+			grid[i] = row
+		}
+
+		for offset := -1; offset <= 1; offset++ {
+			if y := leftY + offset; y >= 0 && y < height {
+				grid[y][leftX] = '|'
+			}
+			if y := rightY + offset; y >= 0 && y < height {
+				grid[y][rightX] = '|'
+			}
+		}
+
+		if ballY >= 0 && ballY < height && ballX >= 0 && ballX < width {
+			grid[ballY][ballX] = 'O'
+		}
+
+		var sb strings.Builder
+		sb.WriteString("<pre>")
+		for _, row := range grid {
+			sb.WriteString(string(row))
+			sb.WriteByte('\n')
+		}
+		sb.WriteString("</pre>")
+		return sb.String()
+	}
+
+	for {
+		select {
+		case <-ticker.C:
+			leftY += leftDir
+			if leftY <= 1 {
+				leftY = 1
+				leftDir = 1
+			} else if leftY >= height-2 {
+				leftY = height - 2
+				leftDir = -1
+			}
+
+			rightY += rightDir
+			if rightY <= 1 {
+				rightY = 1
+				rightDir = 1
+			} else if rightY >= height-2 {
+				rightY = height - 2
+				rightDir = -1
+			}
+
+			nextX := ballX + dx
+			nextY := ballY + dy
+
+			if nextY < 0 || nextY >= height {
+				dy = -dy
+				nextY = ballY + dy
+			}
+
+			if nextX <= leftX {
+				if abs(nextY-leftY) <= paddleSize/2 {
+					dx = 1
+					if nextY < leftY {
+						dy = -1
+					} else if nextY > leftY {
+						dy = 1
+					}
+				} else {
+					dx = 1
+				}
+				nextX = ballX + dx
+			} else if nextX >= rightX {
+				if abs(nextY-rightY) <= paddleSize/2 {
+					dx = -1
+					if nextY < rightY {
+						dy = -1
+					} else if nextY > rightY {
+						dy = 1
+					}
+				} else {
+					dx = -1
+				}
+				nextX = ballX + dx
+			}
+
+			ballX, ballY = nextX, nextY
+			o.send(map[string]any{"type": "other.pong_frame", "html": render(ballX, ballY, leftY, rightY)})
+		case <-deadline:
+			o.stopPong(stopChan)
+			return
+		case <-stopChan:
+			o.stopPong(stopChan)
+			return
+		}
+	}
+}
+
+func (o *otherManager) stopPong(stopChan chan struct{}) {
+	o.mu.Lock()
+	if o.pongStop != stopChan {
+		o.mu.Unlock()
+		return
+	}
+	o.pongStop = nil
+	o.mu.Unlock()
+	o.restoreBase("base_restore")
+}
+
+func startPongTicker(ctx context.Context, other *otherManager) {
+	ticker := time.NewTicker(15 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			other.startPong(time.Minute)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 func main() {
 	cfg := loadConfig()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	hub := newOverlayHub()
+	other := newOtherManager(hub)
 	go hub.run(ctx)
+	go startPongTicker(ctx, other)
 	go func() {
-		if err := consumeChat(ctx, cfg, hub); err != nil {
+		if err := consumeChat(ctx, cfg, hub, other); err != nil {
 			log.Fatalf("rabbitmq consumer stopped: %v", err)
 		}
 	}()
@@ -170,7 +407,7 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func consumeChat(ctx context.Context, cfg config, hub *overlayHub) error {
+func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager) error {
 	for {
 		conn, err := amqp.Dial(cfg.rabbitURL)
 		if err != nil {
@@ -234,7 +471,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub) error {
 					consumeLoop = false
 					break
 				}
-				handleDelivery(d, hub)
+				handleDelivery(d, hub, other)
 			case <-reconnect:
 				consumeLoop = false
 			case <-ctx.Done():
@@ -252,12 +489,8 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub) error {
 	}
 }
 
-func handleDelivery(d amqp.Delivery, hub *overlayHub) {
+func handleDelivery(d amqp.Delivery, hub *overlayHub, other *otherManager) {
 	defer d.Ack(false)
-
-	if d.Type != "" && d.Type != "channel.chat.message" {
-		return
-	}
 
 	var payload eventPayload
 	if err := json.Unmarshal(d.Body, &payload); err != nil {
@@ -265,25 +498,18 @@ func handleDelivery(d amqp.Delivery, hub *overlayHub) {
 		return
 	}
 
-	if payload.EventType != "" && payload.EventType != "channel.chat.message" {
-		return
+	eventType := d.Type
+	if eventType == "" {
+		eventType = payload.EventType
 	}
 
-	msg := formatChat(payload.Event)
-	if msg == nil {
-		return
-	}
-
-	encoded, err := json.Marshal(msg)
-	if err != nil {
-		log.Printf("failed to encode chat message: %v", err)
-		return
-	}
-
-	select {
-	case hub.broadcast <- encoded:
+	switch eventType {
+	case "channel.chat.message":
+		handleChatEvent(payload.Event, hub, other)
+	case "channel.channel_points_custom_reward_redemption.add":
+		handleRedeemEvent(payload.Event, other)
 	default:
-		log.Print("dropping chat message: broadcast channel full")
+		return
 	}
 }
 
@@ -293,10 +519,7 @@ func formatChat(event map[string]any) *chatMessage {
 	}
 
 	username := firstString(event["chatter_user_name"], event["chatter_user_login"], event["broadcaster_user_name"], "chat")
-	messageText := ""
-	if msg, ok := event["message"].(map[string]any); ok {
-		messageText = firstString(msg["text"], msg["message"], "")
-	}
+	messageText := messageTextFromEvent(event)
 
 	if messageText == "" {
 		return nil
@@ -407,4 +630,111 @@ func firstString(values ...any) string {
 		}
 	}
 	return ""
+}
+
+func messageTextFromEvent(event map[string]any) string {
+	if msg, ok := event["message"].(map[string]any); ok {
+		return firstString(msg["text"], msg["message"], "")
+	}
+	return ""
+}
+
+func abs(i int) int {
+	if i < 0 {
+		return -i
+	}
+	return i
+}
+
+func markdownToHTML(input string) string {
+	var buf bytes.Buffer
+	if err := goldmark.Convert([]byte(input), &buf); err != nil {
+		log.Printf("failed to render markdown: %v", err)
+		return html.EscapeString(input)
+	}
+	return buf.String()
+}
+
+func normalizeMarkdownInput(input string) string {
+	normalized := strings.ReplaceAll(input, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\\r\\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\\n", "\n")
+	return normalized
+}
+
+func handleChatEvent(event map[string]any, hub *overlayHub, other *otherManager) {
+	if event == nil {
+		return
+	}
+
+	messageText := messageTextFromEvent(event)
+	lower := strings.ToLower(messageText)
+
+	if strings.Contains(lower, "ping") {
+		other.startPong(time.Minute)
+	}
+
+	if isAuthorizedForOther(event) {
+		if strings.HasPrefix(lower, "!other ") {
+			content := strings.TrimSpace(messageText[len("!other "):])
+			other.setBase(markdownToHTML(normalizeMarkdownInput(content)))
+		} else if strings.EqualFold(strings.TrimSpace(messageText), "!fire") {
+			other.cancelAnnouncement()
+		}
+	}
+
+	msg := formatChat(event)
+	if msg == nil {
+		return
+	}
+
+	encoded, err := json.Marshal(msg)
+	if err != nil {
+		log.Printf("failed to encode chat message: %v", err)
+		return
+	}
+
+	select {
+	case hub.broadcast <- encoded:
+	default:
+		log.Print("dropping chat message: broadcast channel full")
+	}
+}
+
+func handleRedeemEvent(event map[string]any, other *otherManager) {
+	if event == nil {
+		return
+	}
+
+	reward, _ := event["reward"].(map[string]any)
+	title := strings.TrimSpace(firstString(reward["title"], ""))
+	if !strings.EqualFold(title, "announcement") {
+		return
+	}
+
+	userInput := firstString(event["user_input"], "")
+	other.startAnnouncement(markdownToHTML(normalizeMarkdownInput(userInput)), 5*time.Minute)
+}
+
+func isAuthorizedForOther(event map[string]any) bool {
+	chatterID := firstString(event["chatter_user_id"], "")
+	broadcasterID := firstString(event["broadcaster_user_id"], "")
+	if chatterID != "" && chatterID == broadcasterID {
+		return true
+	}
+
+	badgesVal, ok := event["badges"].([]any)
+	if !ok {
+		return false
+	}
+	for _, raw := range badgesVal {
+		badge, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if setID := firstString(badge["set_id"], ""); setID == "moderator" || setID == "broadcaster" {
+			return true
+		}
+	}
+	return false
 }
