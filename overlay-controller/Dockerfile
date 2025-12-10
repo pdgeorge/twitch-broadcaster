@@ -9,7 +9,11 @@ COPY . .
 
 ARG TARGETOS
 ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -o overlay-controller main.go
+# Build for the requested platform; fall back to the host platform when not explicitly set.
+RUN set -euo pipefail \
+    && build_os=${TARGETOS:-$(go env GOOS)} \
+    && build_arch=${TARGETARCH:-$(go env GOARCH)} \
+    && CGO_ENABLED=0 GOOS="$build_os" GOARCH="$build_arch" go build -o overlay-controller main.go
 
 FROM gcr.io/distroless/base-debian12
 
