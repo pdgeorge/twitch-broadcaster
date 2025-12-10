@@ -16,6 +16,8 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    networks:
+    - twitchbroadcaster_net
 
   twitch_receiver:
     build: ./twitch_receiver
@@ -30,6 +32,8 @@ services:
     environment:
       RABBITMQ_URL: ${RABBITMQ_URL:-amqp://guest:guest@twitch_broadcaster:5672/}
     restart: unless-stopped
+    networks:
+    - twitchbroadcaster_net
 
   overlay_controller:
     build: ./overlay-controller
@@ -52,6 +56,12 @@ services:
       twitch_receiver:
         condition: service_started
     restart: unless-stopped
+    networks:
+    - twitchbroadcaster_net
 
 volumes:
   tokens:
+
+networks:
+  twitchbroadcaster_net:
+    external: true

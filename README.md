@@ -78,6 +78,13 @@ An overlay controller service streams `channel.chat.message` events to browser c
 - Twitch emotes are expanded server-side; the overlay page also auto-loads BTTV/FFZ/7TV global + channel emotes for richer chat rendering.
 - Environment variables for the overlay controller: `RABBITMQ_URL`, `RABBITMQ_EXCHANGE`, `OVERLAY_QUEUE`, `OVERLAY_HTTP_PORT`, `OVERLAY_STATIC_DIR`.
 
+### Chat commands
+
+- **`ping`** (any chatter): starts a brief Pong animation in the lower “other” box for about a minute.
+- **`!other <text>`** (broadcaster/moderators): replaces the lower box with your message. Basic Markdown is rendered (e.g., `*italic*`, `**bold**`, lists, headings).
+- **Channel point reward titled “announcement”**: when redeemed, the lower box shows the submitted text (Markdown supported) for five minutes.
+- **`!fire`** (broadcaster/moderators): clears any active announcement early and restores the last `!other` content.
+
 ## Notes on long-running operation
 
 - Tokens are refreshed on startup and then every 80% of their reported lifetime to keep the container running indefinitely (including resource-constrained devices such as Raspberry Pi).
