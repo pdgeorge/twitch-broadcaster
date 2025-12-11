@@ -48,6 +48,7 @@ services:
       OVERLAY_STATIC_DIR: /app/overlay
     volumes:
       - ./overlay:/app/overlay:ro
+      - tokens:/data
     ports:
       - "${OVERLAY_HTTP_PORT:-8080}:${OVERLAY_HTTP_PORT:-8080}"
     depends_on:

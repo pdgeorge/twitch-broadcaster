@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"html"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -15,9 +17,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gorilla/websocket"
-	amqp "github.com/rabbitmq/amqp091-go"
-	"github.com/yuin/goldmark"
+        "github.com/gorilla/websocket"
+        amqp "github.com/rabbitmq/amqp091-go"
+        "github.com/yuin/goldmark"
+        _ "modernc.org/sqlite"
 )
 
 type config struct {
@@ -26,6 +29,10 @@ type config struct {
 	queueName      string
 	httpPort       string
 	staticDir      string
+	dbPath         string
+	tokenCachePath string
+	clientID       string
+	channelID      string
 }
 
 type chatFragment struct {
@@ -57,6 +64,22 @@ type overlayHub struct {
 	clients   map[*websocket.Conn]struct{}
 	broadcast chan []byte
 }
+
+type loginStore struct {
+	db *sql.DB
+}
+
+type chatClient struct {
+	client        *http.Client
+	tokenPath     string
+	clientID      string
+	broadcasterID string
+}
+
+const (
+	dailyLoginRewardTitle = "daily login bonus"
+	twitchChatMessagesURL = "https://api.twitch.tv/helix/chat/messages"
+)
 
 func newOverlayHub() *overlayHub {
 	return &overlayHub{
@@ -106,6 +129,35 @@ func (h *overlayHub) run(ctx context.Context) {
 	}
 }
 
+func newLoginStore(db *sql.DB) *loginStore {
+	return &loginStore{db: db}
+}
+
+func (s *loginStore) init(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS login_counts (
+                user_id TEXT PRIMARY KEY,
+                user_login TEXT,
+                count INTEGER NOT NULL
+        )`)
+	return err
+}
+
+func (s *loginStore) increment(ctx context.Context, userID, userLogin string) (int64, error) {
+	if userID == "" {
+		return 0, fmt.Errorf("user id is required")
+	}
+
+	row := s.db.QueryRowContext(ctx, `INSERT INTO login_counts (user_id, user_login, count) VALUES (?, ?, 1)
+                ON CONFLICT(user_id) DO UPDATE SET count = login_counts.count + 1, user_login = excluded.user_login
+                RETURNING count`, userID, userLogin)
+
+	var count int64
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 func (h *overlayHub) handleWS(w http.ResponseWriter, r *http.Request) {
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
@@ -133,6 +185,15 @@ func (h *overlayHub) handleWS(w http.ResponseWriter, r *http.Request) {
 
 func newOtherManager(hub *overlayHub) *otherManager {
 	return &otherManager{hub: hub, pongInitialMessage: "<pre class=\"pong-frame\">Starting pong...</pre>"}
+}
+
+func newChatClient(cfg config) *chatClient {
+	return &chatClient{
+		client:        &http.Client{Timeout: 10 * time.Second},
+		tokenPath:     cfg.tokenCachePath,
+		clientID:      cfg.clientID,
+		broadcasterID: cfg.channelID,
+	}
 }
 
 func (o *otherManager) send(obj any) {
@@ -171,6 +232,69 @@ func (o *otherManager) startAnnouncement(html string, duration time.Duration) {
 		"html":             html,
 		"duration_seconds": int(duration.Seconds()),
 	})
+}
+
+func (c *chatClient) accessToken() (string, error) {
+	if c.tokenPath == "" {
+		return "", fmt.Errorf("token cache path not configured")
+	}
+	data, err := os.ReadFile(c.tokenPath)
+	if err != nil {
+		return "", fmt.Errorf("read token cache: %w", err)
+	}
+
+	var cache struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return "", fmt.Errorf("parse token cache: %w", err)
+	}
+	if cache.AccessToken == "" {
+		return "", fmt.Errorf("access token not found in cache")
+	}
+	return cache.AccessToken, nil
+}
+
+func (c *chatClient) send(ctx context.Context, message string) error {
+	if c.clientID == "" || c.broadcasterID == "" {
+		return fmt.Errorf("chat client missing client_id or broadcaster_id")
+	}
+
+	token, err := c.accessToken()
+	if err != nil {
+		return err
+	}
+
+	body := map[string]string{
+		"broadcaster_id":        c.broadcasterID,
+		"sender_broadcaster_id": c.broadcasterID,
+		"message":               message,
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("encode chat payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, twitchChatMessagesURL, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Client-Id", c.clientID)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("chat send failed: status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	return nil
 }
 
 func (o *otherManager) cancelAnnouncement() {
@@ -360,12 +484,25 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	db, err := sql.Open("sqlite", cfg.dbPath)
+	if err != nil {
+		log.Fatalf("failed to open sqlite db: %v", err)
+	}
+	defer db.Close()
+
+	store := newLoginStore(db)
+	if err := store.init(ctx); err != nil {
+		log.Fatalf("failed to prepare sqlite schema: %v", err)
+	}
+
+	chatClient := newChatClient(cfg)
+
 	hub := newOverlayHub()
 	other := newOtherManager(hub)
 	go hub.run(ctx)
 	go startPongTicker(ctx, other)
 	go func() {
-		if err := consumeChat(ctx, cfg, hub, other); err != nil {
+		if err := consumeChat(ctx, cfg, hub, other, store, chatClient); err != nil {
 			log.Fatalf("rabbitmq consumer stopped: %v", err)
 		}
 	}()
@@ -397,6 +534,10 @@ func loadConfig() config {
 		queueName:      env("OVERLAY_QUEUE", "overlay_chat"),
 		httpPort:       env("OVERLAY_HTTP_PORT", "8080"),
 		staticDir:      env("OVERLAY_STATIC_DIR", "./overlay"),
+		dbPath:         env("LOGIN_DB_PATH", "/data/login_counts.db"),
+		tokenCachePath: env("TOKEN_CACHE_PATH", "/data/tokens.json"),
+		clientID:       env("CLIENT_ID", ""),
+		channelID:      env("CHANNEL_ID", ""),
 	}
 }
 
@@ -407,7 +548,7 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager) error {
+func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager, store *loginStore, chat *chatClient) error {
 	for {
 		conn, err := amqp.Dial(cfg.rabbitURL)
 		if err != nil {
@@ -471,7 +612,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 					consumeLoop = false
 					break
 				}
-				handleDelivery(d, hub, other)
+				handleDelivery(ctx, d, hub, other, store, chat)
 			case <-reconnect:
 				consumeLoop = false
 			case <-ctx.Done():
@@ -489,7 +630,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 	}
 }
 
-func handleDelivery(d amqp.Delivery, hub *overlayHub, other *otherManager) {
+func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other *otherManager, store *loginStore, chat *chatClient) {
 	defer d.Ack(false)
 
 	var payload eventPayload
@@ -507,7 +648,7 @@ func handleDelivery(d amqp.Delivery, hub *overlayHub, other *otherManager) {
 	case "channel.chat.message":
 		handleChatEvent(payload.Event, hub, other)
 	case "channel.channel_points_custom_reward_redemption.add":
-		handleRedeemEvent(payload.Event, other)
+		handleRedeemEvent(ctx, payload.Event, other, store, chat)
 	default:
 		return
 	}
@@ -701,19 +842,42 @@ func handleChatEvent(event map[string]any, hub *overlayHub, other *otherManager)
 	}
 }
 
-func handleRedeemEvent(event map[string]any, other *otherManager) {
+func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherManager, store *loginStore, chat *chatClient) {
 	if event == nil {
 		return
 	}
 
 	reward, _ := event["reward"].(map[string]any)
 	title := strings.TrimSpace(firstString(reward["title"], ""))
-	if !strings.EqualFold(title, "announcement") {
+
+	switch {
+	case strings.EqualFold(title, "announcement"):
+		userInput := firstString(event["user_input"], "")
+		other.startAnnouncement(markdownToHTML(normalizeMarkdownInput(userInput)), 5*time.Minute)
+	case strings.EqualFold(title, dailyLoginRewardTitle):
+		userID := firstString(event["user_id"], "")
+		userLogin := firstString(event["user_login"], event["user_name"], userID)
+		if userID == "" {
+			log.Print("daily login bonus redemption missing user_id")
+			return
+		}
+
+		opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+
+		count, err := store.increment(opCtx, userID, userLogin)
+		if err != nil {
+			log.Printf("failed to increment login count for %s: %v", userID, err)
+			return
+		}
+
+		message := fmt.Sprintf("@%s your daily login count is now %d!", userLogin, count)
+		if err := chat.send(opCtx, message); err != nil {
+			log.Printf("failed to send daily login chat message: %v", err)
+		}
+	default:
 		return
 	}
-
-	userInput := firstString(event["user_input"], "")
-	other.startAnnouncement(markdownToHTML(normalizeMarkdownInput(userInput)), 5*time.Minute)
 }
 
 func isAuthorizedForOther(event map[string]any) bool {
