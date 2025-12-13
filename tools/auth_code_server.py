@@ -17,6 +17,70 @@ import urllib.request
 AUTHORIZE_URL = "https://id.twitch.tv/oauth2/authorize"
 TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 
+# A curated list of current Helix/EventSub scopes. Keep this in sync with the
+# Twitch docs when they add or retire scopes. Notably, Twitch does *not* expose
+# a "channel:manage:whispers" scope, so it is intentionally absent here.
+ALL_SCOPES = [
+    "analytics:read:extensions",
+    "analytics:read:games",
+    "bits:read",
+    "channel:bot",
+    "channel:edit:commercial",
+    "channel:manage:ads",
+    "channel:manage:broadcast",
+    "channel:manage:extensions",
+    "channel:manage:moderators",
+    "channel:manage:polls",
+    "channel:manage:predictions",
+    "channel:manage:raids",
+    "channel:manage:redemptions",
+    "channel:manage:schedule",
+    "channel:manage:videos",
+    "channel:manage:vips",
+    "channel:read:ads",
+    "channel:read:charity",
+    "channel:read:editors",
+    "channel:read:goals",
+    "channel:read:hype_train",
+    "channel:read:polls",
+    "channel:read:predictions",
+    "channel:read:redemptions",
+    "channel:read:stream_key",
+    "channel:read:subscriptions",
+    "channel:read:vips",
+    "chat:edit",
+    "chat:read",
+    "clips:edit",
+    "moderation:read",
+    "moderator:manage:announcements",
+    "moderator:manage:automod",
+    "moderator:manage:automod_settings",
+    "moderator:manage:banned_users",
+    "moderator:manage:blocked_terms",
+    "moderator:manage:chat_messages",
+    "moderator:manage:chat_settings",
+    "moderator:manage:shield_mode",
+    "moderator:manage:shoutouts",
+    "moderator:read:blocked_terms",
+    "moderator:read:chat_settings",
+    "moderator:read:followers",
+    "moderator:read:shield_mode",
+    "moderator:read:shoutouts",
+    "user:edit",
+    "user:edit:broadcast",
+    "user:edit:follows",
+    "user:manage:blocked_users",
+    "user:manage:chat_color",
+    "user:manage:whispers",
+    "user:read:blocked_users",
+    "user:read:broadcast",
+    "user:read:email",
+    "user:read:follows",
+    "user:read:subscriptions",
+    "whispers:edit",
+    "whispers:read",
+]
+
 
 def build_authorize_url(client_id: str, redirect_uri: str, scopes: list[str], state: str) -> str:
     params = {
@@ -110,10 +174,16 @@ def main():
         default=["chat:edit", "chat:read"],
         help="Space-separated scopes to request (default: chat:edit chat:read)",
     )
+    parser.add_argument(
+        "--all-scopes",
+        action="store_true",
+        help="Request the full curated scope list from this helper instead of --scopes",
+    )
     args = parser.parse_args()
 
+    scopes = ALL_SCOPES if args.all_scopes else args.scopes
     state = secrets.token_urlsafe(16)
-    authorize_url = build_authorize_url(args.client_id, args.redirect_uri, args.scopes, state)
+    authorize_url = build_authorize_url(args.client_id, args.redirect_uri, scopes, state)
     print("Open this URL in your browser and authorize as the broadcaster:\n")
     print(authorize_url)
 

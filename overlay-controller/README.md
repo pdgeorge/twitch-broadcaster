@@ -41,6 +41,13 @@ python tools/auth_code_server.py --client-id "$CLIENT_ID" --client-secret "$CLIE
 
 Open the printed URL in your browser, authorize as the broadcaster, and the script will exchange the code for tokens. Copy the `refresh_token` into your `.env` as `REFRESH_TOKEN` so the stack can refresh it automatically.
 
+If you want to request a "kitchen sink" token, add `--all-scopes` to reuse the helper's curated list of Twitch scopes (the list omits retired/invalid scopes such as `channel:manage:whispers` to avoid 400 errors):
+
+```bash
+python tools/auth_code_server.py --client-id "$CLIENT_ID" --client-secret "$CLIENT_SECRET" \
+  --redirect-uri "http://localhost:17563/callback" --all-scopes
+```
+
 ## Message format
 
 WebSocket payloads use this shape:
