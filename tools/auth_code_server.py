@@ -37,6 +37,7 @@ ALL_SCOPES = [
     "channel:manage:schedule",
     "channel:manage:videos",
     "channel:manage:vips",
+    "channel:moderate",
     "channel:read:ads",
     "channel:read:charity",
     "channel:read:editors",
@@ -77,6 +78,8 @@ ALL_SCOPES = [
     "user:read:email",
     "user:read:follows",
     "user:read:subscriptions",
+    "user:read:chat",
+    "user:write:chat",
     "whispers:edit",
     "whispers:read",
 ]
