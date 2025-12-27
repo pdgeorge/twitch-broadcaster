@@ -19,6 +19,7 @@ LOGGER = logging.getLogger("twitch_receiver")
 TWITCH_EVENTSUB_WS = "wss://eventsub.wss.twitch.tv/ws"
 TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 TWITCH_EVENTSUB_URL = "https://api.twitch.tv/helix/eventsub/subscriptions"
+TWITCH_CHAT_MESSAGES_URL = "https://api.twitch.tv/helix/chat/messages"
 
 
 @dataclass
@@ -105,6 +106,32 @@ class RabbitPublisher:
         message = aio_pika.Message(body=body, type=event_type)
         await self.exchange.publish(message, routing_key="")
         LOGGER.debug("Published event %s", event_type)
+
+
+class RabbitCommandConsumer:
+    def __init__(self, url: str, exchange_name: str, queue_name: str):
+        self.url = url
+        self.exchange_name = exchange_name
+        self.queue_name = queue_name
+        self.connection: aio_pika.RobustConnection | None = None
+        self.channel: aio_pika.abc.AbstractRobustChannel | None = None
+        self.exchange: aio_pika.Exchange | None = None
+        self.queue: aio_pika.Queue | None = None
+
+    async def connect(self) -> None:
+        LOGGER.info("Connecting command consumer to RabbitMQ at %s", self.url)
+        self.connection = await aio_pika.connect_robust(self.url)
+        self.channel = await self.connection.channel()
+        await self.channel.set_qos(prefetch_count=10)
+        self.exchange = await self.channel.declare_exchange(self.exchange_name, aio_pika.ExchangeType.FANOUT, durable=True)
+        self.queue = await self.channel.declare_queue(self.queue_name, durable=True)
+        await self.queue.bind(self.exchange, routing_key="")
+        LOGGER.info("Command consumer ready: exchange=%s queue=%s", self.exchange_name, self.queue_name)
+
+    async def consume(self, handler) -> None:
+        if not self.queue:
+            raise RuntimeError("Queue not initialized")
+        await self.queue.consume(handler)
 
 
 class TwitchEventSubClient:
@@ -199,6 +226,25 @@ class TwitchEventSubClient:
                 else:
                     LOGGER.info("Subscribed to %s", subscription["type"])
 
+    async def send_chat(self, message: str, channel_id: str | None = None) -> None:
+        channel = channel_id or self.channel_id
+        if not channel:
+            raise RuntimeError("Missing channel_id for chat send")
+        if not message:
+            raise RuntimeError("Missing message for chat send")
+
+        session = await self._ensure_session()
+        headers = await self._auth_headers()
+        payload = {
+            "broadcaster_id": channel,
+            "sender_id": channel,
+            "message": message,
+        }
+        async with session.post(TWITCH_CHAT_MESSAGES_URL, headers=headers, json=payload) as resp:
+            if resp.status >= 300:
+                detail = await resp.text()
+                raise RuntimeError(f"Chat send failed: status {resp.status}: {detail}")
+
     async def _handle_notification(self, message: Dict[str, Any]) -> None:
         payload = message.get("payload", {})
         event_type = payload.get("subscription", {}).get("type", "unknown")
@@ -275,11 +321,14 @@ def main() -> None:
     channel_id = required_env("CHANNEL_ID")
     rabbitmq_url = os.getenv("RABBITMQ_URL", "amqp://guest:guest@twitch_broadcaster:5672/")
     exchange = os.getenv("RABBITMQ_EXCHANGE", "twitch_events")
+    command_exchange = os.getenv("RABBITMQ_COMMAND_EXCHANGE", "twitch_commands")
+    command_queue = os.getenv("RABBITMQ_COMMAND_QUEUE", "twitch_commands")
     token_cache_path = Path(os.getenv("TOKEN_CACHE_PATH", "/data/tokens.json"))
 
     manager = TokenManager(client_id, client_secret, refresh_token, token_cache_path)
     manager.load_cache()
     publisher = RabbitPublisher(rabbitmq_url, exchange)
+    command_consumer = RabbitCommandConsumer(rabbitmq_url, command_exchange, command_queue)
     client = TwitchEventSubClient(manager, channel_id, publisher)
 
     async def runner() -> None:
@@ -287,6 +336,34 @@ def main() -> None:
             await manager.refresh(session)
             asyncio.create_task(schedule_token_refresh(manager, session))
             await publisher.connect()
+            await command_consumer.connect()
+
+            async def handle_command_message(message: aio_pika.abc.AbstractIncomingMessage) -> None:
+                async with message.process():
+                    event_type = message.type or ""
+                    try:
+                        payload = json.loads(message.body) if message.body else {}
+                    except json.JSONDecodeError as exc:
+                        LOGGER.warning("Invalid command payload: %s", exc)
+                        return
+
+                    LOGGER.info("Command received: %s", event_type)
+
+                    if event_type == "channel.command.send_chat":
+                        channel = payload.get("channel_id")
+                        chat_message = payload.get("message")
+                        if not channel or not chat_message:
+                            LOGGER.warning("send_chat missing channel_id or message")
+                            return
+                        try:
+                            await client.send_chat(str(chat_message), str(channel))
+                            LOGGER.info("Command completed: %s", event_type)
+                        except Exception as exc:
+                            LOGGER.error("Command failed: %s: %s", event_type, exc)
+                    else:
+                        LOGGER.warning("Unknown command type: %s", event_type)
+
+            await command_consumer.consume(handle_command_message)
             await client.listen()
 
     asyncio.run(runner())

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -26,13 +25,11 @@ import (
 type config struct {
 	rabbitURL      string
 	rabbitExchange string
+	commandExchange string
 	queueName      string
 	httpPort       string
 	staticDir      string
 	dbPath         string
-	tokenCachePath string
-	clientID       string
-	channelID      string
 }
 
 type chatFragment struct {
@@ -69,17 +66,14 @@ type loginStore struct {
 	db *sql.DB
 }
 
-type chatClient struct {
-	client        *http.Client
-	tokenPath     string
-	clientID      string
-	broadcasterID string
+type commandPublisher struct {
+	url      string
+	exchange string
+	conn     *amqp.Connection
+	channel  *amqp.Channel
 }
 
-const (
-	dailyLoginRewardTitle = "daily login bonus"
-	twitchChatMessagesURL = "https://api.twitch.tv/helix/chat/messages"
-)
+const dailyLoginRewardTitle = "daily login bonus"
 
 func newOverlayHub() *overlayHub {
 	return &overlayHub{
@@ -131,6 +125,71 @@ func (h *overlayHub) run(ctx context.Context) {
 
 func newLoginStore(db *sql.DB) *loginStore {
 	return &loginStore{db: db}
+}
+
+func newCommandPublisher(cfg config) *commandPublisher {
+	return &commandPublisher{
+		url:      cfg.rabbitURL,
+		exchange: cfg.commandExchange,
+	}
+}
+
+func (p *commandPublisher) ensureConnected() error {
+	if p.conn != nil && !p.conn.IsClosed() && p.channel != nil && !p.channel.IsClosed() {
+		return nil
+	}
+
+	conn, err := amqp.Dial(p.url)
+	if err != nil {
+		return err
+	}
+	ch, err := conn.Channel()
+	if err != nil {
+		conn.Close()
+		return err
+	}
+	if err := ch.ExchangeDeclare(p.exchange, "fanout", true, false, false, false, nil); err != nil {
+		ch.Close()
+		conn.Close()
+		return err
+	}
+
+	p.conn = conn
+	p.channel = ch
+	return nil
+}
+
+func (p *commandPublisher) publish(ctx context.Context, eventType string, payload any) error {
+	if err := p.ensureConnected(); err != nil {
+		return err
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	err = p.channel.PublishWithContext(ctx, p.exchange, "", false, false, amqp.Publishing{
+		ContentType: "application/json",
+		Type:        eventType,
+		Body:        body,
+	})
+	if err != nil {
+		_ = p.channel.Close()
+		_ = p.conn.Close()
+		p.channel = nil
+		p.conn = nil
+	}
+	return err
+}
+
+func (p *commandPublisher) close() {
+	if p.channel != nil {
+		_ = p.channel.Close()
+	}
+	if p.conn != nil {
+		_ = p.conn.Close()
+	}
 }
 
 func (s *loginStore) init(ctx context.Context) error {
@@ -187,15 +246,6 @@ func newOtherManager(hub *overlayHub) *otherManager {
 	return &otherManager{hub: hub, pongInitialMessage: "<pre class=\"pong-frame\">Starting pong...</pre>"}
 }
 
-func newChatClient(cfg config) *chatClient {
-	return &chatClient{
-		client:        &http.Client{Timeout: 10 * time.Second},
-		tokenPath:     cfg.tokenCachePath,
-		clientID:      cfg.clientID,
-		broadcasterID: cfg.channelID,
-	}
-}
-
 func (o *otherManager) send(obj any) {
 	data, err := json.Marshal(obj)
 	if err != nil {
@@ -232,69 +282,6 @@ func (o *otherManager) startAnnouncement(html string, duration time.Duration) {
 		"html":             html,
 		"duration_seconds": int(duration.Seconds()),
 	})
-}
-
-func (c *chatClient) accessToken() (string, error) {
-	if c.tokenPath == "" {
-		return "", fmt.Errorf("token cache path not configured")
-	}
-	data, err := os.ReadFile(c.tokenPath)
-	if err != nil {
-		return "", fmt.Errorf("read token cache: %w", err)
-	}
-
-	var cache struct {
-		AccessToken string `json:"access_token"`
-	}
-	if err := json.Unmarshal(data, &cache); err != nil {
-		return "", fmt.Errorf("parse token cache: %w", err)
-	}
-	if cache.AccessToken == "" {
-		return "", fmt.Errorf("access token not found in cache")
-	}
-	return cache.AccessToken, nil
-}
-
-func (c *chatClient) send(ctx context.Context, message string) error {
-	if c.clientID == "" || c.broadcasterID == "" {
-		return fmt.Errorf("chat client missing client_id or broadcaster_id")
-	}
-
-	token, err := c.accessToken()
-	if err != nil {
-		return err
-	}
-
-	body := map[string]string{
-		"broadcaster_id":        c.broadcasterID,
-		"sender_id": c.broadcasterID,
-		"message":               message,
-	}
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("encode chat payload: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, twitchChatMessagesURL, bytes.NewReader(payload))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Client-Id", c.clientID)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("chat send failed: status %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	return nil
 }
 
 func (o *otherManager) cancelAnnouncement() {
@@ -495,14 +482,15 @@ func main() {
 		log.Fatalf("failed to prepare sqlite schema: %v", err)
 	}
 
-	chatClient := newChatClient(cfg)
+	commandPublisher := newCommandPublisher(cfg)
+	defer commandPublisher.close()
 
 	hub := newOverlayHub()
 	other := newOtherManager(hub)
 	go hub.run(ctx)
 	go startPongTicker(ctx, other)
 	go func() {
-		if err := consumeChat(ctx, cfg, hub, other, store, chatClient); err != nil {
+		if err := consumeChat(ctx, cfg, hub, other, store, commandPublisher); err != nil {
 			log.Fatalf("rabbitmq consumer stopped: %v", err)
 		}
 	}()
@@ -531,13 +519,11 @@ func loadConfig() config {
 	return config{
 		rabbitURL:      env("RABBITMQ_URL", "amqp://guest:guest@twitch_broadcaster:5672/"),
 		rabbitExchange: env("RABBITMQ_EXCHANGE", "twitch_events"),
+		commandExchange: env("RABBITMQ_COMMAND_EXCHANGE", "twitch_commands"),
 		queueName:      env("OVERLAY_QUEUE", "overlay_chat"),
 		httpPort:       env("OVERLAY_HTTP_PORT", "8080"),
 		staticDir:      env("OVERLAY_STATIC_DIR", "./overlay"),
 		dbPath:         env("LOGIN_DB_PATH", "/data/login_counts.db"),
-		tokenCachePath: env("TOKEN_CACHE_PATH", "/data/tokens.json"),
-		clientID:       env("CLIENT_ID", ""),
-		channelID:      env("CHANNEL_ID", ""),
 	}
 }
 
@@ -548,7 +534,7 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager, store *loginStore, chat *chatClient) error {
+func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager, store *loginStore, commands *commandPublisher) error {
 	for {
 		conn, err := amqp.Dial(cfg.rabbitURL)
 		if err != nil {
@@ -612,7 +598,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 					consumeLoop = false
 					break
 				}
-				handleDelivery(ctx, d, hub, other, store, chat)
+				handleDelivery(ctx, d, hub, other, store, commands)
 			case <-reconnect:
 				consumeLoop = false
 			case <-ctx.Done():
@@ -630,7 +616,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 	}
 }
 
-func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other *otherManager, store *loginStore, chat *chatClient) {
+func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other *otherManager, store *loginStore, commands *commandPublisher) {
 	defer d.Ack(false)
 
 	var payload eventPayload
@@ -648,7 +634,7 @@ func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other
 	case "channel.chat.message":
 		handleChatEvent(payload.Event, hub, other)
 	case "channel.channel_points_custom_reward_redemption.add":
-		handleRedeemEvent(ctx, payload.Event, other, store, chat)
+		handleRedeemEvent(ctx, payload.Event, other, store, commands)
 	default:
 		return
 	}
@@ -842,7 +828,7 @@ func handleChatEvent(event map[string]any, hub *overlayHub, other *otherManager)
 	}
 }
 
-func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherManager, store *loginStore, chat *chatClient) {
+func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherManager, store *loginStore, commands *commandPublisher) {
 	if event == nil {
 		return
 	}
@@ -872,8 +858,16 @@ func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherMa
 		}
 
 		message := fmt.Sprintf("@%s your daily login count is now %d!", userLogin, count)
-		if err := chat.send(opCtx, message); err != nil {
-			log.Printf("failed to send daily login chat message: %v", err)
+		broadcasterID := firstString(event["broadcaster_user_id"], "")
+		if broadcasterID == "" {
+			log.Print("daily login bonus redemption missing broadcaster_user_id")
+			return
+		}
+		if err := commands.publish(opCtx, "channel.command.send_chat", map[string]any{
+			"channel_id": broadcasterID,
+			"message":    message,
+		}); err != nil {
+			log.Printf("failed to publish daily login chat command: %v", err)
 		}
 	default:
 		return
