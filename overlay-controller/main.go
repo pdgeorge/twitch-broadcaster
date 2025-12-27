@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -15,17 +16,20 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gorilla/websocket"
-	amqp "github.com/rabbitmq/amqp091-go"
-	"github.com/yuin/goldmark"
+        "github.com/gorilla/websocket"
+        amqp "github.com/rabbitmq/amqp091-go"
+        "github.com/yuin/goldmark"
+        _ "modernc.org/sqlite"
 )
 
 type config struct {
 	rabbitURL      string
 	rabbitExchange string
+	commandExchange string
 	queueName      string
 	httpPort       string
 	staticDir      string
+	dbPath         string
 }
 
 type chatFragment struct {
@@ -57,6 +61,19 @@ type overlayHub struct {
 	clients   map[*websocket.Conn]struct{}
 	broadcast chan []byte
 }
+
+type loginStore struct {
+	db *sql.DB
+}
+
+type commandPublisher struct {
+	url      string
+	exchange string
+	conn     *amqp.Connection
+	channel  *amqp.Channel
+}
+
+const dailyLoginRewardTitle = "daily login bonus"
 
 func newOverlayHub() *overlayHub {
 	return &overlayHub{
@@ -104,6 +121,100 @@ func (h *overlayHub) run(ctx context.Context) {
 			return
 		}
 	}
+}
+
+func newLoginStore(db *sql.DB) *loginStore {
+	return &loginStore{db: db}
+}
+
+func newCommandPublisher(cfg config) *commandPublisher {
+	return &commandPublisher{
+		url:      cfg.rabbitURL,
+		exchange: cfg.commandExchange,
+	}
+}
+
+func (p *commandPublisher) ensureConnected() error {
+	if p.conn != nil && !p.conn.IsClosed() && p.channel != nil && !p.channel.IsClosed() {
+		return nil
+	}
+
+	conn, err := amqp.Dial(p.url)
+	if err != nil {
+		return err
+	}
+	ch, err := conn.Channel()
+	if err != nil {
+		conn.Close()
+		return err
+	}
+	if err := ch.ExchangeDeclare(p.exchange, "fanout", true, false, false, false, nil); err != nil {
+		ch.Close()
+		conn.Close()
+		return err
+	}
+
+	p.conn = conn
+	p.channel = ch
+	return nil
+}
+
+func (p *commandPublisher) publish(ctx context.Context, eventType string, payload any) error {
+	if err := p.ensureConnected(); err != nil {
+		return err
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	err = p.channel.PublishWithContext(ctx, p.exchange, "", false, false, amqp.Publishing{
+		ContentType: "application/json",
+		Type:        eventType,
+		Body:        body,
+	})
+	if err != nil {
+		_ = p.channel.Close()
+		_ = p.conn.Close()
+		p.channel = nil
+		p.conn = nil
+	}
+	return err
+}
+
+func (p *commandPublisher) close() {
+	if p.channel != nil {
+		_ = p.channel.Close()
+	}
+	if p.conn != nil {
+		_ = p.conn.Close()
+	}
+}
+
+func (s *loginStore) init(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS login_counts (
+                user_id TEXT PRIMARY KEY,
+                user_login TEXT,
+                count INTEGER NOT NULL
+        )`)
+	return err
+}
+
+func (s *loginStore) increment(ctx context.Context, userID, userLogin string) (int64, error) {
+	if userID == "" {
+		return 0, fmt.Errorf("user id is required")
+	}
+
+	row := s.db.QueryRowContext(ctx, `INSERT INTO login_counts (user_id, user_login, count) VALUES (?, ?, 1)
+                ON CONFLICT(user_id) DO UPDATE SET count = login_counts.count + 1, user_login = excluded.user_login
+                RETURNING count`, userID, userLogin)
+
+	var count int64
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (h *overlayHub) handleWS(w http.ResponseWriter, r *http.Request) {
@@ -360,12 +471,26 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	db, err := sql.Open("sqlite", cfg.dbPath)
+	if err != nil {
+		log.Fatalf("failed to open sqlite db: %v", err)
+	}
+	defer db.Close()
+
+	store := newLoginStore(db)
+	if err := store.init(ctx); err != nil {
+		log.Fatalf("failed to prepare sqlite schema: %v", err)
+	}
+
+	commandPublisher := newCommandPublisher(cfg)
+	defer commandPublisher.close()
+
 	hub := newOverlayHub()
 	other := newOtherManager(hub)
 	go hub.run(ctx)
 	go startPongTicker(ctx, other)
 	go func() {
-		if err := consumeChat(ctx, cfg, hub, other); err != nil {
+		if err := consumeChat(ctx, cfg, hub, other, store, commandPublisher); err != nil {
 			log.Fatalf("rabbitmq consumer stopped: %v", err)
 		}
 	}()
@@ -394,9 +519,11 @@ func loadConfig() config {
 	return config{
 		rabbitURL:      env("RABBITMQ_URL", "amqp://guest:guest@twitch_broadcaster:5672/"),
 		rabbitExchange: env("RABBITMQ_EXCHANGE", "twitch_events"),
+		commandExchange: env("RABBITMQ_COMMAND_EXCHANGE", "twitch_commands"),
 		queueName:      env("OVERLAY_QUEUE", "overlay_chat"),
 		httpPort:       env("OVERLAY_HTTP_PORT", "8080"),
 		staticDir:      env("OVERLAY_STATIC_DIR", "./overlay"),
+		dbPath:         env("LOGIN_DB_PATH", "/data/login_counts.db"),
 	}
 }
 
@@ -407,7 +534,7 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager) error {
+func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager, store *loginStore, commands *commandPublisher) error {
 	for {
 		conn, err := amqp.Dial(cfg.rabbitURL)
 		if err != nil {
@@ -471,7 +598,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 					consumeLoop = false
 					break
 				}
-				handleDelivery(d, hub, other)
+				handleDelivery(ctx, d, hub, other, store, commands)
 			case <-reconnect:
 				consumeLoop = false
 			case <-ctx.Done():
@@ -489,7 +616,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 	}
 }
 
-func handleDelivery(d amqp.Delivery, hub *overlayHub, other *otherManager) {
+func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other *otherManager, store *loginStore, commands *commandPublisher) {
 	defer d.Ack(false)
 
 	var payload eventPayload
@@ -507,7 +634,7 @@ func handleDelivery(d amqp.Delivery, hub *overlayHub, other *otherManager) {
 	case "channel.chat.message":
 		handleChatEvent(payload.Event, hub, other)
 	case "channel.channel_points_custom_reward_redemption.add":
-		handleRedeemEvent(payload.Event, other)
+		handleRedeemEvent(ctx, payload.Event, other, store, commands)
 	default:
 		return
 	}
@@ -701,19 +828,50 @@ func handleChatEvent(event map[string]any, hub *overlayHub, other *otherManager)
 	}
 }
 
-func handleRedeemEvent(event map[string]any, other *otherManager) {
+func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherManager, store *loginStore, commands *commandPublisher) {
 	if event == nil {
 		return
 	}
 
 	reward, _ := event["reward"].(map[string]any)
 	title := strings.TrimSpace(firstString(reward["title"], ""))
-	if !strings.EqualFold(title, "announcement") {
+
+	switch {
+	case strings.EqualFold(title, "announcement"):
+		userInput := firstString(event["user_input"], "")
+		other.startAnnouncement(markdownToHTML(normalizeMarkdownInput(userInput)), 5*time.Minute)
+	case strings.EqualFold(title, dailyLoginRewardTitle):
+		userID := firstString(event["user_id"], "")
+		userLogin := firstString(event["user_login"], event["user_name"], userID)
+		if userID == "" {
+			log.Print("daily login bonus redemption missing user_id")
+			return
+		}
+
+		opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+
+		count, err := store.increment(opCtx, userID, userLogin)
+		if err != nil {
+			log.Printf("failed to increment login count for %s: %v", userID, err)
+			return
+		}
+
+		message := fmt.Sprintf("@%s your daily login count is now %d!", userLogin, count)
+		broadcasterID := firstString(event["broadcaster_user_id"], "")
+		if broadcasterID == "" {
+			log.Print("daily login bonus redemption missing broadcaster_user_id")
+			return
+		}
+		if err := commands.publish(opCtx, "channel.command.send_chat", map[string]any{
+			"channel_id": broadcasterID,
+			"message":    message,
+		}); err != nil {
+			log.Printf("failed to publish daily login chat command: %v", err)
+		}
+	default:
 		return
 	}
-
-	userInput := firstString(event["user_input"], "")
-	other.startAnnouncement(markdownToHTML(normalizeMarkdownInput(userInput)), 5*time.Minute)
 }
 
 func isAuthorizedForOther(event map[string]any) bool {

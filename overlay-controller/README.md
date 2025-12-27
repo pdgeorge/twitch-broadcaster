@@ -25,6 +25,28 @@ go run ./...
 - `OVERLAY_QUEUE` (default `overlay_chat`)
 - `OVERLAY_HTTP_PORT` (default `8080`)
 - `OVERLAY_STATIC_DIR` (default `./overlay`)
+- `LOGIN_DB_PATH` (default `/data/login_counts.db`)
+- `TOKEN_CACHE_PATH` (default `/data/tokens.json`)
+- `CLIENT_ID` (your Twitch application client ID)
+- `CHANNEL_ID` (broadcaster ID for sending chat messages)
+
+## Getting a broadcaster refresh token with chat scopes
+
+Run the helper outside Docker to generate a refresh token that includes `chat:edit` and `chat:read` (plus any extra scopes you pass):
+
+```bash
+python tools/auth_code_server.py --client-id "$CLIENT_ID" --client-secret "$CLIENT_SECRET" \
+  --redirect-uri "http://localhost:17563/callback" --scopes chat:edit chat:read
+```
+
+Open the printed URL in your browser, authorize as the broadcaster, and the script will exchange the code for tokens. Copy the `refresh_token` into your `.env` as `REFRESH_TOKEN` so the stack can refresh it automatically.
+
+If you want to request a "kitchen sink" token, add `--all-scopes` to reuse the helper's curated list of Twitch scopes (the list omits retired/invalid scopes such as `channel:manage:whispers` to avoid 400 errors):
+
+```bash
+python tools/auth_code_server.py --client-id "$CLIENT_ID" --client-secret "$CLIENT_SECRET" \
+  --redirect-uri "http://localhost:17563/callback" --all-scopes
+```
 
 ## Message format
 
