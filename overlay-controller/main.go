@@ -267,7 +267,7 @@ func (c *chatClient) send(ctx context.Context, message string) error {
 
 	body := map[string]string{
 		"broadcaster_id":        c.broadcasterID,
-		"sender_broadcaster_id": c.broadcasterID,
+		"sender_id": c.broadcasterID,
 		"message":               message,
 	}
 	payload, err := json.Marshal(body)
