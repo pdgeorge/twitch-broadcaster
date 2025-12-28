@@ -60,4 +60,4 @@ volumes:
 
 networks:
   twitchbroadcaster_net:
-  
+    external: true  
