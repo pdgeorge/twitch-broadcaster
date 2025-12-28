@@ -6,7 +6,7 @@ The overlay controller streams Twitch chat messages from RabbitMQ to a browser o
 
 ```bash
 # from repo root
-cd overlay-controller
+cd overlay_controller
 OVERLAY_HTTP_PORT=8080 \
 OVERLAY_STATIC_DIR=../overlay \
 RABBITMQ_URL=amqp://guest:guest@localhost:5672/ \

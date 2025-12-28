@@ -502,7 +502,7 @@ func main() {
 	srv := &http.Server{Addr: ":" + cfg.httpPort, Handler: mux}
 
 	go func() {
-		log.Printf("overlay-controller listening on :%s", cfg.httpPort)
+		log.Printf("overlay_controller listening on :%s", cfg.httpPort)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("http server error: %v", err)
 		}
@@ -512,7 +512,7 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
-	log.Print("overlay-controller shutdown complete")
+	log.Print("overlay_controller shutdown complete")
 }
 
 func loadConfig() config {
@@ -580,7 +580,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 			continue
 		}
 
-		log.Print("overlay-controller consuming chat messages from RabbitMQ")
+		log.Print("overlay_controller consuming chat messages from RabbitMQ")
 		reconnect := make(chan struct{})
 		go func() {
 			select {

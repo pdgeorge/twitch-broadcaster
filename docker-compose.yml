@@ -1,9 +1,6 @@
-version: "3.9"
-
 services:
-  twitch_broadcaster:
+  rabbitmq:
     image: rabbitmq:3-management
-    container_name: twitch_broadcaster
     ports:
       - "5672:5672"
       - "15672:15672"
@@ -17,31 +14,29 @@ services:
       retries: 5
     restart: unless-stopped
     networks:
-    - twitchbroadcaster_net
+      - twitchbroadcaster_net
 
   twitch_receiver:
     build: ./twitch_receiver
-    container_name: twitch_receiver
     env_file:
       - .env
     volumes:
       - tokens:/data
     depends_on:
-      twitch_broadcaster:
+      rabbitmq:
         condition: service_healthy
     environment:
-      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://guest:guest@twitch_broadcaster:5672/}
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672/}
     restart: unless-stopped
     networks:
-    - twitchbroadcaster_net
+      - twitchbroadcaster_net
 
   overlay_controller:
-    build: ./overlay-controller
-    container_name: overlay_controller
+    build: ./overlay_controller
     env_file:
       - .env
     environment:
-      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://guest:guest@twitch_broadcaster:5672/}
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672/}
       RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE:-twitch_events}
       OVERLAY_QUEUE: ${OVERLAY_QUEUE:-overlay_chat}
       OVERLAY_HTTP_PORT: ${OVERLAY_HTTP_PORT:-8080}
@@ -52,17 +47,17 @@ services:
     ports:
       - "${OVERLAY_HTTP_PORT:-8080}:${OVERLAY_HTTP_PORT:-8080}"
     depends_on:
-      twitch_broadcaster:
+      rabbitmq:
         condition: service_healthy
       twitch_receiver:
         condition: service_started
     restart: unless-stopped
     networks:
-    - twitchbroadcaster_net
+      - twitchbroadcaster_net
 
 volumes:
   tokens:
 
 networks:
   twitchbroadcaster_net:
-    external: true
+    external: true  
