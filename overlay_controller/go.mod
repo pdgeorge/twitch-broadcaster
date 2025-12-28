@@ -1,4 +1,4 @@
-module overlay-controller
+module overlay_controller
 
 go 1.21
 

@@ -13,16 +13,16 @@ ARG TARGETARCH
 RUN set -euo pipefail \
     && build_os=${TARGETOS:-$(go env GOOS)} \
     && build_arch=${TARGETARCH:-$(go env GOARCH)} \
-    && CGO_ENABLED=0 GOOS="$build_os" GOARCH="$build_arch" go build -o overlay-controller main.go
+    && CGO_ENABLED=0 GOOS="$build_os" GOARCH="$build_arch" go build -o overlay_controller main.go
 
 FROM gcr.io/distroless/base-debian12
 
 WORKDIR /app
 
-COPY --from=builder /app/overlay-controller /app/overlay-controller
+COPY --from=builder /app/overlay_controller /app/overlay_controller
 
 ENV OVERLAY_STATIC_DIR=/app/overlay
 
 EXPOSE 8080
 
-CMD ["/app/overlay-controller"]
+CMD ["/app/overlay_controller"]
