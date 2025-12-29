@@ -49,14 +49,37 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+      mysql:
+        condition: service_healthy
       twitch_receiver:
         condition: service_started
     restart: unless-stopped
     networks:
       - twitchbroadcaster_net
 
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: echoes
+      MYSQL_USER: echoes
+      MYSQL_PASSWORD: echoespw
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - twitchbroadcaster_net
+
 volumes:
   tokens:
+  mysql_data:
 
 networks:
   twitchbroadcaster_net:
