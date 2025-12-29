@@ -15,11 +15,12 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"strconv"
 
         "github.com/gorilla/websocket"
         amqp "github.com/rabbitmq/amqp091-go"
         "github.com/yuin/goldmark"
-        _ "modernc.org/sqlite"
+        _ "github.com/go-sql-driver/mysql"
 )
 
 type config struct {
@@ -29,7 +30,7 @@ type config struct {
 	queueName      string
 	httpPort       string
 	staticDir      string
-	dbPath         string
+	mysqlDSN       string
 }
 
 type chatFragment struct {
@@ -193,22 +194,46 @@ func (p *commandPublisher) close() {
 }
 
 func (s *loginStore) init(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS login_counts (
-                user_id TEXT PRIMARY KEY,
-                user_login TEXT,
-                count INTEGER NOT NULL
-        )`)
+	_, err := s.db.ExecContext(ctx, `
+	CREATE TABLE IF NOT EXISTS chatters (
+	twitch_chatter_id   BIGINT       NOT NULL,
+	twitch_chatter_name VARCHAR(64)  NOT NULL,
+	logins              INT          NOT NULL DEFAULT 0,
+	exp                 INT          NOT NULL DEFAULT 0,
+	money               INT          NOT NULL DEFAULT 0,
+	cosmetics           JSON         NULL,
+	last_seen_at        DATETIME     NULL,
+	created_at          DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at          DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+	PRIMARY KEY (twitch_chatter_id),
+	INDEX idx_chatters_name (twitch_chatter_name)
+	)`)
 	return err
 }
 
 func (s *loginStore) increment(ctx context.Context, userID, userLogin string) (int64, error) {
-	if userID == "" {
-		return 0, fmt.Errorf("user id is required")
+	// Convert Twitch user id from string -> int64 for BIGINT column
+	id, err := strconv.ParseInt(userID, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid userID %q: %w", userID, err)
 	}
 
-	row := s.db.QueryRowContext(ctx, `INSERT INTO login_counts (user_id, user_login, count) VALUES (?, ?, 1)
-                ON CONFLICT(user_id) DO UPDATE SET count = login_counts.count + 1, user_login = excluded.user_login
-                RETURNING count`, userID, userLogin)
+	_, err = s.db.ExecContext(ctx, `
+	INSERT INTO chatters (twitch_chatter_id, twitch_chatter_name, logins, last_seen_at)
+	VALUES (?, ?, 1, NOW())
+	ON DUPLICATE KEY UPDATE
+	  logins = logins + 1,
+	  twitch_chatter_name = VALUES(twitch_chatter_name),
+	  last_seen_at = NOW()
+	`, id, userLogin)
+	if err != nil {
+		return 0, err
+	}
+
+	// Fetch the new count
+	row := s.db.QueryRowContext(ctx, `
+	SELECT logins FROM chatters WHERE twitch_chatter_id = ?
+	`, id)
 
 	var count int64
 	if err := row.Scan(&count); err != nil {
@@ -471,15 +496,18 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	db, err := sql.Open("sqlite", cfg.dbPath)
+	db, err := sql.Open("mysql", cfg.mysqlDSN)
 	if err != nil {
-		log.Fatalf("failed to open sqlite db: %v", err)
+		log.Fatalf("failed to open mysql db: %v", err)
+	}
+	if err := db.PingContext(ctx); err != nil {
+		log.Fatalf("failed to ping mysql db: %v", err)
 	}
 	defer db.Close()
 
 	store := newLoginStore(db)
 	if err := store.init(ctx); err != nil {
-		log.Fatalf("failed to prepare sqlite schema: %v", err)
+		log.Fatalf("failed to prepare mysql schema: %v", err)
 	}
 
 	commandPublisher := newCommandPublisher(cfg)
@@ -523,7 +551,7 @@ func loadConfig() config {
 		queueName:      env("OVERLAY_QUEUE", "overlay_chat"),
 		httpPort:       env("OVERLAY_HTTP_PORT", "8080"),
 		staticDir:      env("OVERLAY_STATIC_DIR", "./overlay"),
-		dbPath:         env("LOGIN_DB_PATH", "/data/login_counts.db"),
+		mysqlDSN:		env("MYSQL_DSN", "echoes:echoespw@tcp(mysql:3306)/echoes?parseTime=true"),
 	}
 }
 
@@ -840,22 +868,24 @@ func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherMa
 	case strings.EqualFold(title, "announcement"):
 		userInput := firstString(event["user_input"], "")
 		other.startAnnouncement(markdownToHTML(normalizeMarkdownInput(userInput)), 5*time.Minute)
-	case strings.EqualFold(title, dailyLoginRewardTitle):
+	case strings.EqualFold(title, dailyLoginRewardTitle),
+		strings.EqualFold(title, "general_test"):
 		userID := firstString(event["user_id"], "")
 		userLogin := firstString(event["user_login"], event["user_name"], userID)
 		if userID == "" {
 			log.Print("daily login bonus redemption missing user_id")
 			return
 		}
-
+		
 		opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-
+		
 		count, err := store.increment(opCtx, userID, userLogin)
 		if err != nil {
 			log.Printf("failed to increment login count for %s: %v", userID, err)
 			return
 		}
+		log.Printf("daily login incremented: user=%s count=%d", userLogin, count)
 
 		message := fmt.Sprintf("@%s your daily login count is now %d!", userLogin, count)
 		broadcasterID := firstString(event["broadcaster_user_id"], "")
