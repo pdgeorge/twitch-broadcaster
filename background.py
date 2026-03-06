@@ -1,8 +1,14 @@
 import json
 import os
 import pika
+from dotenv import load_dotenv
 
-RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+load_dotenv()
+
+try:
+    RABBITMQ_URL = os.getenv("RABBITMQ_URL")
+except KeyError:
+    raise RunetimeError("RABBITMQ_URL must be set in the environment")
 EXCHANGE = os.getenv("RABBITMQ_EXCHANGE", "twitch_events")
 QUEUE_NAME = os.getenv("QUEUE_NAME", "twitch_event_printer")
 
@@ -39,6 +45,8 @@ def handle_chat_and_rewards(event_type: str, payload: dict) -> None:
 
 
 def main() -> None:
+    print(f"{RABBITMQ_URL=}")
+    print("RABBITMQ_URL =", RABBITMQ_URL)
     params = pika.URLParameters(RABBITMQ_URL)
     connection = pika.BlockingConnection(params)
     channel = connection.channel()
