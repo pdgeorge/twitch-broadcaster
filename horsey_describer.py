@@ -41,6 +41,7 @@ from dotenv import load_dotenv
 from gtts import gTTS
 from PIL import ImageGrab
 from pynput import keyboard
+from tiktok_tts import tiktok_tts
 
 from obswebsocket import requests as obs_requests
 from OBS_Websocket import OBSWebsocketsManager
@@ -50,13 +51,16 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+TIKTOK_TOKEN = os.getenv("TIKTOK_TOKEN")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 OBS_JIGGLE_SOURCE = os.getenv("OBS_JIGGLE_SOURCE", "HorseIcon")
 
 # Primary monitor capture region — adjust these to taste
 # Format: (left, top, right, bottom) in pixels
 # Default: full 1920x1080 primary monitor
-SCREENSHOT_REGION = (0, 0, 1920, 1080)
+# Full Screen left screen example
+# SCREENSHOT_REGION = (0, 0, 1920, 1080)
+SCREENSHOT_REGION = (462, 305, 1533, 771)
 
 # Screenshot save directory — saved before sending to Claude so you can
 # quickly verify/adjust the region without waiting for API response
@@ -212,10 +216,29 @@ def speak_tts(text: str) -> list[tuple[float, float]]:
     Contract: always returns a list of (timestamp_ms, amplitude 0.0-1.0) tuples.
     """
     try:
-        tts = gTTS(text=text, lang="en", slow=False)
+        # gTTS implementation
+        # tts = gTTS(text=text, lang="en", slow=False)
+        # with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+        #     tmp_path = f.name
+        # tts.save(tmp_path)
+
+        # TikTokTextToSpeech Imeplementation
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
             tmp_path = f.name
-        tts.save(tmp_path)
+
+        result_path, _ = tiktok_tts(
+            session_id=TIKTOK_TOKEN,
+            req_text=text,
+            text_speaker="en_us_ghostface",
+            filename=tmp_path,
+        )
+
+        if result_path is None:
+            print("[TTS] TikTok TTS failed.")
+            return [], None, None
+
+        # Other implementation
+        # Note: Save file to tmp_path with suffix as .mp3
 
         # Extract envelope before playback
         envelope = _extract_envelope(tmp_path)
@@ -256,7 +279,7 @@ def _screenshot_to_b64() -> str:
 def describe_abomination(mode_key: str) -> None:
     """Full pipeline: screenshot → Claude vision → TTS + OBS jiggle."""
     mode = MODES[mode_key]
-    text_prompt = "Describe the abomination you see"
+    text_prompt = "Describe the abomination you see. It is riding on a tractor bed and it may be sleeping (denoted by having 'ZZZ' over its head)"
     print(f"\n[Horsey] Triggered: {mode['label']}")
 
     # 1. Screenshot
