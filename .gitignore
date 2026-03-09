@@ -7,3 +7,9 @@ __pycache__/
 .envrc
 venv
 /data
+*.jpg
+*.mp3
+*.wav
+test*
+*.kra
+*.png
