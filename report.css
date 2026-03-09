@@ -1,0 +1,219 @@
+/* report.css — Cryptid Research Unit Field Report Styling */
+
+@import url('https://fonts.googleapis.com/css2?family=Special+Elite&family=Courier+Prime:ital,wght@0,400;0,700;1,400&display=swap');
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html, body {
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Special Elite', 'Courier Prime', Courier, monospace;
+}
+
+.page {
+    width: 780px;
+    min-height: 600px;
+    max-height: 900px;
+    overflow: hidden;
+    background-color: #f2e0b0;
+    background-image:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='400' height='400' filter='url(%23noise)' opacity='0.08'/%3E%3C/svg%3E");
+    padding: 48px 56px;
+    position: relative;
+
+    /* Torn/burned edges via layered box shadows + clip-path */
+    filter:
+        drop-shadow(0 0 18px rgba(80, 40, 0, 0.55))
+        drop-shadow(0 0 6px rgba(180, 90, 0, 0.3));
+
+    clip-path: polygon(
+        0% 2%,
+        1.5% 0%,
+        3% 1.2%,
+        5% 0.3%,
+        7% 1.8%,
+        9% 0%,
+        12% 1.5%,
+        15% 0.5%,
+        18% 1%,
+        22% 0%,
+        26% 1.8%,
+        30% 0.3%,
+        35% 1.2%,
+        40% 0%,
+        45% 1.5%,
+        50% 0.2%,
+        55% 1.8%,
+        60% 0%,
+        65% 1.2%,
+        70% 0.5%,
+        75% 1%,
+        80% 0%,
+        85% 1.8%,
+        90% 0.3%,
+        93% 1.5%,
+        96% 0%,
+        98% 1.2%,
+        100% 0.5%,
+
+        99% 10%,
+        100% 20%,
+        99.5% 30%,
+        100% 40%,
+        99% 50%,
+        100% 60%,
+        99.5% 70%,
+        100% 80%,
+        99% 90%,
+        100% 100%,
+
+        95% 99.5%,
+        90% 100%,
+        85% 98.8%,
+        80% 100%,
+        75% 99.2%,
+        70% 100%,
+        65% 98.5%,
+        60% 100%,
+        55% 99%,
+        50% 100%,
+        45% 98.8%,
+        40% 100%,
+        35% 99.2%,
+        30% 100%,
+        25% 98.5%,
+        20% 100%,
+        15% 99%,
+        10% 100%,
+        5% 99.5%,
+        0% 100%,
+
+        0.5% 90%,
+        0% 80%,
+        0.5% 70%,
+        0% 60%,
+        0.5% 50%,
+        0% 40%,
+        0.5% 30%,
+        0% 20%,
+        0.5% 10%
+    );
+}
+
+/* Scorched corner overlays */
+.page::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0;
+    width: 120px; height: 120px;
+    background: radial-gradient(ellipse at top left, rgba(60,20,0,0.45) 0%, transparent 70%);
+    pointer-events: none;
+}
+
+.page::after {
+    content: '';
+    position: absolute;
+    bottom: 0; right: 0;
+    width: 150px; height: 150px;
+    background: radial-gradient(ellipse at bottom right, rgba(60,20,0,0.38) 0%, transparent 70%);
+    pointer-events: none;
+}
+
+/* ── Typography ── */
+
+.report-header {
+    text-align: center;
+    border-bottom: 2px solid #5a3a1a;
+    padding-bottom: 14px;
+    margin-bottom: 22px;
+}
+
+.report-header .classification {
+    font-size: 11px;
+    letter-spacing: 4px;
+    color: #8b2020;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+}
+
+.report-header h1 {
+    font-size: 20px;
+    color: #2a1a08;
+    line-height: 1.3;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.report-header .meta {
+    font-size: 11px;
+    color: #5a3a1a;
+    margin-top: 8px;
+    letter-spacing: 1px;
+}
+
+.report-body h2 {
+    font-size: 13px;
+    color: #2a1a08;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin: 18px 0 6px 0;
+    border-bottom: 1px solid #9a7a4a;
+    padding-bottom: 3px;
+}
+
+.report-body p {
+    font-size: 13px;
+    color: #1e1208;
+    line-height: 1.7;
+    margin-bottom: 10px;
+    text-align: justify;
+}
+
+.report-body ul, .report-body ol {
+    margin: 6px 0 10px 24px;
+}
+
+.report-body li {
+    font-size: 13px;
+    color: #1e1208;
+    line-height: 1.6;
+    margin-bottom: 3px;
+}
+
+.report-body strong {
+    color: #2a1a08;
+    font-weight: 700;
+}
+
+.report-body em {
+    font-style: italic;
+    color: #4a2a08;
+}
+
+.report-footer {
+    margin-top: 24px;
+    border-top: 1px solid #9a7a4a;
+    padding-top: 10px;
+    font-size: 10px;
+    color: #7a5a2a;
+    letter-spacing: 2px;
+    text-align: center;
+    text-transform: uppercase;
+}
+
+/* Redaction effect — wrap text in <span class="redacted"> to black it out */
+.redacted {
+    background: #1a1a1a;
+    color: #1a1a1a;
+    padding: 0 4px;
+    border-radius: 1px;
+    user-select: none;
+}
