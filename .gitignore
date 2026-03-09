@@ -13,3 +13,4 @@ venv
 test*
 *.kra
 *.png
+temp/*
