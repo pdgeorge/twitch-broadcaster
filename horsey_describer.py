@@ -41,26 +41,28 @@ from dotenv import load_dotenv
 from gtts import gTTS
 from PIL import ImageGrab
 from pynput import keyboard
-from tiktok_tts import tiktok_tts
 
 from obswebsocket import requests as obs_requests
 from OBS_Websocket import OBSWebsocketsManager
+from tiktok_tts import tiktok_tts
+from report_renderer import render_report
 
 load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-TIKTOK_TOKEN = os.getenv("TIKTOK_TOKEN")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-OBS_JIGGLE_SOURCE = os.getenv("OBS_JIGGLE_SOURCE", "HorseIcon")
+ANTHROPIC_API_KEY    = os.getenv("ANTHROPIC_API_KEY")
+OBS_JIGGLE_SOURCE    = os.getenv("OBS_JIGGLE_SOURCE", "HorseIcon")
+OBS_REPORT_SOURCE    = os.getenv("OBS_REPORT_SOURCE", "HorseReport")
+TIKTOK_TOKEN         = os.getenv("TIKTOK_TOKEN")
+REPORTS_DIR          = os.getenv("REPORTS_DIR", "./temp/reports")
+REPORT_DISPLAY_SECS  = int(os.getenv("REPORT_DISPLAY_SECONDS", 30))
 
 # Primary monitor capture region — adjust these to taste
 # Format: (left, top, right, bottom) in pixels
 # Default: full 1920x1080 primary monitor
-# Full Screen left screen example
-# SCREENSHOT_REGION = (0, 0, 1920, 1080)
-SCREENSHOT_REGION = (462, 305, 1533, 771)
+SCREENSHOT_REGION = (0, 0, 1920, 1080)
 
 # Screenshot save directory — saved before sending to Claude so you can
 # quickly verify/adjust the region without waiting for API response
@@ -93,15 +95,23 @@ MODES = {
             "deeply unsettling observation. Keep it to roughly four to six sentences."
         ),
     },
-    "monologue": {
-        "label": "Full Unhinged Monologue",
-        "prompt": (
-            "You are an unhinged cryptid researcher who has completely lost it. "
-            "This is your magnum opus. Describe the creature or abomination in the "
-            "screenshot as if writing a field journal entry that will be found after "
-            "you disappear. Cover its appearance, probable diet, spiritual implications, "
-            "what government agency is covering it up, and why horses were a mistake. "
-            "Go completely off the rails. No length limit — let it flow."
+    "report": {
+        "label": "Full Field Report",
+        "prompt_report": (
+            "You are an unhinged cryptid researcher writing an official classified field report. "
+            "Write a structured report in markdown about the creature or abomination in the screenshot. "
+            "Use markdown headings (##) for sections. Include sections for: Physical Description, "
+            "Dietary Preferences, Spiritual Implications, Government Cover-Up, and Why Horses Were A Mistake. "
+            "Be detailed, paranoid, and scientifically unhinged. "
+            "Do NOT use asterisks for bullet points — use actual markdown list syntax (- item). "
+            "Do NOT write anything that would sound weird read aloud — this is a written document only."
+        ),
+        "prompt_summary": (
+            "You are an unhinged cryptid researcher giving a live spoken summary of your latest field report. "
+            "Summarise the key findings in exactly THREE to FOUR sentences, spoken word only. "
+            "No markdown, no formatting, no bullet points, no asterisks. "
+            "Be alarmed, be weird, end on something deeply unsettling. "
+            "Speak as if you are addressing a live audience who cannot see the report."
         ),
     },
 }
@@ -111,7 +121,7 @@ NUMPAD_CHAR_MAP = {
     '0': "screenshot_only",
     '1': "short",
     '2': "medium",
-    '3': "monologue",
+    '3': "report",
 }
 
 # Guard against overlapping triggers
@@ -164,7 +174,7 @@ def _extract_envelope(audio_path: str) -> list[tuple[float, float]]:
 # ---------------------------------------------------------------------------
 # OBS jiggle  —  driven by live amplitude envelope + VLC playback clock
 # ---------------------------------------------------------------------------
-MAX_ROTATION = 15.0  # degrees at peak amplitude
+MAX_ROTATION = 45.0  # degrees at peak amplitude
 
 def _obs_jiggle(envelope: list[tuple[float, float]], player: vlc.MediaPlayer) -> None:
     """
@@ -216,13 +226,6 @@ def speak_tts(text: str) -> list[tuple[float, float]]:
     Contract: always returns a list of (timestamp_ms, amplitude 0.0-1.0) tuples.
     """
     try:
-        # gTTS implementation
-        # tts = gTTS(text=text, lang="en", slow=False)
-        # with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
-        #     tmp_path = f.name
-        # tts.save(tmp_path)
-
-        # TikTokTextToSpeech Imeplementation
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
             tmp_path = f.name
 
@@ -236,9 +239,6 @@ def speak_tts(text: str) -> list[tuple[float, float]]:
         if result_path is None:
             print("[TTS] TikTok TTS failed.")
             return [], None, None
-
-        # Other implementation
-        # Note: Save file to tmp_path with suffix as .mp3
 
         # Extract envelope before playback
         envelope = _extract_envelope(tmp_path)
@@ -276,23 +276,13 @@ def _screenshot_to_b64() -> str:
     return base64.standard_b64encode(buf.getvalue()).decode("utf-8")
 
 
-def describe_abomination(mode_key: str) -> None:
-    """Full pipeline: screenshot → Claude vision → TTS + OBS jiggle."""
-    mode = MODES[mode_key]
-    text_prompt = "Describe the abomination you see. It is riding on a tractor bed and it may be sleeping (denoted by having 'ZZZ' over its head)"
-    print(f"\n[Horsey] Triggered: {mode['label']}")
-
-    # 1. Screenshot
-    print("[Horsey] Capturing screen...")
-    img_b64 = _screenshot_to_b64()
-
-    # 2. Claude vision
-    print("[Horsey] Sending to Claude...")
+def _claude_vision_call(system_prompt: str, img_b64: str, user_text: str, max_tokens: int = 1000) -> str | None:
+    """Single Claude vision call. Returns response text or None on error."""
     try:
         response = anthropic_client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=1000,
-            system=mode["prompt"],
+            max_tokens=max_tokens,
+            system=system_prompt,
             messages=[
                 {
                     "role": "user",
@@ -305,35 +295,132 @@ def describe_abomination(mode_key: str) -> None:
                                 "data": img_b64,
                             },
                         },
-                        {
-                            "type": "text",
-                            "text": f"{text_prompt}",
-                        },
+                        {"type": "text", "text": user_text},
                     ],
                 }
             ],
         )
-        description = response.content[0].text
+        return response.content[0].text
     except Exception as e:
         print(f"[Horsey] Claude API error: {e}")
+        return None
+
+
+def _run_report_pipeline(img_b64: str) -> None:
+    """
+    Mode 3 pipeline:
+      1. Claude call 1 → full markdown report → saved as .md + rendered to current_report.html
+      2. OBS displays report via temp_display_report (you implement this in OBSWebsocketsManager)
+      3. Claude call 2 → 3-4 sentence spoken summary → TTS + jiggle
+    """
+    mode = MODES["report"]
+
+    # 1. Generate full report
+    print("[Horsey] Generating field report...")
+    report_md = _claude_vision_call(
+        system_prompt=mode["prompt_report"],
+        img_b64=img_b64,
+        user_text="Write the field report for this abomination.",
+        max_tokens=2000,
+    )
+    if not report_md:
+        print("[Horsey] Report generation failed.")
         return
 
-    print(f"\n[Horsey] Description:\n{description}\n")
+    print(f"[Horsey] Report generated ({len(report_md)} chars)")
 
-    # 3. Generate TTS audio + extract envelope (envelope ready before playback starts)
-    envelope, player, tmp_path = speak_tts(description)
+    # 2. Render HTML and display in OBS
+    html_path = render_report(report_md, reports_dir=REPORTS_DIR)
+    threading.Thread(
+        target=_obs_display_report,
+        args=(html_path,),
+        daemon=True
+    ).start()
 
+    # 3. Generate spoken summary (separate Claude call)
+    print("[Horsey] Generating spoken summary...")
+    summary = _claude_vision_call(
+        system_prompt=mode["prompt_summary"],
+        img_b64=img_b64,
+        user_text="Summarise your field report findings for the live audience.",
+        max_tokens=300,
+    )
+    if not summary:
+        print("[Horsey] Summary generation failed.")
+        return
+
+    print(f"[Horsey] Summary:\n{summary}\n")
+
+    # 4. TTS + jiggle on summary
+    envelope, player, tmp_path = speak_tts(summary)
     if player is None:
-        print("[Horsey] TTS failed, skipping jiggle.")
+        print("[Horsey] TTS failed.")
         return
 
-    # 4. Jiggle in sync with live playback (non-blocking, shares player reference)
     jiggle_thread = threading.Thread(
         target=_obs_jiggle, args=(envelope, player), daemon=True
     )
     jiggle_thread.start()
 
-    # 5. Wait for VLC to finish, then clean up
+    while player.get_state() not in (vlc.State.Ended, vlc.State.Error, vlc.State.Stopped):
+        time.sleep(0.1)
+    player.release()
+    if tmp_path:
+        os.unlink(tmp_path)
+
+
+def _obs_display_report(html_path: str) -> None:
+    """
+    Tell OBS to refresh the Browser Source and display it for REPORT_DISPLAY_SECS.
+    Calls temp_display_report() on OBSWebsocketsManager — implement that in OBS_Websocket.py.
+    """
+    try:
+        import asyncio
+        obs_mgr = OBSWebsocketsManager()
+        asyncio.run(obs_mgr.temp_display_report(OBS_REPORT_SOURCE, REPORT_DISPLAY_SECS))
+    except Exception as e:
+        print(f"[OBS] Report display failed (non-fatal): {e}")
+
+
+def describe_abomination(mode_key: str) -> None:
+    """Full pipeline: screenshot → Claude vision → TTS + OBS jiggle."""
+    mode = MODES[mode_key]
+    print(f"\n[Horsey] Triggered: {mode['label']}")
+
+    # 1. Screenshot
+    print("[Horsey] Capturing screen...")
+    img_b64 = _screenshot_to_b64()
+
+    # 2. Report mode has its own pipeline
+    if mode_key == "report":
+        _run_report_pipeline(img_b64)
+        return
+
+    # 3. Standard pipeline — single Claude call
+    print("[Horsey] Sending to Claude...")
+    description = _claude_vision_call(
+        system_prompt=mode["prompt"],
+        img_b64=img_b64,
+        user_text="Describe this abomination.",
+    )
+    if not description:
+        return
+
+    print(f"\n[Horsey] Description:\n{description}\n")
+
+    # 4. TTS + envelope
+    envelope, player, tmp_path = speak_tts(description)
+    if player is None:
+        print("[Horsey] TTS failed, skipping jiggle.")
+        return
+
+    # 5. Jiggle in sync with live playback
+    jiggle_thread = threading.Thread(
+        target=_obs_jiggle, args=(envelope, player), daemon=True
+    )
+    jiggle_thread.start()
+
+    # 6. Wait for VLC to finish, then clean up
     while player.get_state() not in (vlc.State.Ended, vlc.State.Error, vlc.State.Stopped):
         time.sleep(0.1)
     player.release()
@@ -378,8 +465,10 @@ def main() -> None:
     print(f"  NUMPAD_0 → Screenshot only (no API call)")
     print(f"  NUMPAD_1 → Short & Punchy")
     print(f"  NUMPAD_2 → Medium Rant")
-    print(f"  NUMPAD_3 → Full Monologue")
-    print(f"  OBS source to jiggle: {OBS_JIGGLE_SOURCE}")
+    print(f"  NUMPAD_3 → Full Field Report (HTML + spoken summary)")
+    print(f"  OBS jiggle source:  {OBS_JIGGLE_SOURCE}")
+    print(f"  OBS report source:  {OBS_REPORT_SOURCE}")
+    print(f"  Reports directory:  {REPORTS_DIR}")
     print("  Press CTRL+C to exit.\n")
 
     with keyboard.Listener(on_press=on_press) as listener:

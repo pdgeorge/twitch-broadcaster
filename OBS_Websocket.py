@@ -131,6 +131,19 @@ class OBSWebsocketsManager():
         self.set_source_visibility(current_scene_name, element_name, False)
         return
 
+    async def temp_display_report(self, element_name, display_time):
+        response = self.ws.call(requests.GetCurrentProgramScene())
+        current_scene_name = response.getSceneName()
+        # Refresh the browser source cache
+        self.ws.call(requests.PressInputPropertiesButton(
+            inputName=element_name,
+            propertyName="refreshnocache"
+        ))
+        self.set_source_visibility(current_scene_name, element_name, True)
+        await asyncio.sleep(display_time)
+        self.set_source_visibility(current_scene_name, element_name, False)
+
+
 
 incoming = {
     "element_name": "element",
