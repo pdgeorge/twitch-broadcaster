@@ -9,6 +9,7 @@ Loads character config from a JSON file, handles:
   - Claude vision/text call
   - TikTok TTS playback
   - OBS jiggle sync
+  - Session log file writing (logs/{name}.txt, overwritten each response)
 
 JSON schema (e.g. dabbert.json):
 {
@@ -24,8 +25,8 @@ import base64
 import io
 import json
 import math
-import sys
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -51,6 +52,7 @@ ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY")
 OBS_JIGGLE_SOURCE  = os.getenv("OBS_JIGGLE_SOURCE", "HorseIcon")
 SCREENSHOT_REGION  = (0, 0, 1920, 1080)
 SCREENSHOT_DIR     = "./temp/dnd_screenshots"
+LOG_DIR            = "./logs"
 SAMPLE_RATE        = 16000   # Whisper expects 16kHz
 ENVELOPE_CHUNK_MS  = 50
 MAX_ROTATION       = 45.0
@@ -124,15 +126,19 @@ class AIPlayer:
         self.pop_count:     int  = cfg.get("pop_count", 10)
         self.obs_source:    str  = cfg.get("obs_source", OBS_JIGGLE_SOURCE)
 
-        self.session_log    = session_log       # shared reference
-        self.screenshot_flag = screenshot_flag  # shared ScreenshotFlag object
+        self.session_log     = session_log       # shared reference
+        self.screenshot_flag = screenshot_flag   # shared ScreenshotFlag object
 
-        self._recording     = False
-        self._audio_frames  = []
-        self._record_lock   = threading.Lock()
-        self._busy          = threading.Lock()
+        self._recording    = False
+        self._audio_frames = []
+        self._record_lock  = threading.Lock()
+        self._busy         = threading.Lock()
+
+        os.makedirs(LOG_DIR, exist_ok=True)
+        self._log_path = os.path.join(LOG_DIR, f"{self.name}.txt")
 
         print(f"[{self.name}] Loaded from {config_path}")
+        print(f"[{self.name}] Session log → {self._log_path}")
 
     # ------------------------------------------------------------------
     # Session log helpers
@@ -148,6 +154,18 @@ class AIPlayer:
 
     def _format_log(self) -> str:
         return "\n".join(f"[{e['speaker']}]: {e['text']}" for e in self.session_log)
+
+    def _write_log_file(self, system_prompt: str, user_prompt: str, response: str) -> None:
+        """Overwrite {name}.txt with full session state after each response."""
+        try:
+            with open(self._log_path, "w", encoding="utf-8") as f:
+                f.write(f"=== SYSTEM PROMPT ===\n{system_prompt}\n\n")
+                f.write(f"=== SESSION LOG ===\n{self._format_log()}\n\n")
+                f.write(f"=== LAST PROMPT SENT ===\n{user_prompt}\n\n")
+                f.write(f"=== LAST RESPONSE ===\n{response}\n")
+            print(f"[{self.name}] Log written → {self._log_path}")
+        except Exception as e:
+            print(f"[{self.name}] Log write failed (non-fatal): {e}")
 
     # ------------------------------------------------------------------
     # Screenshot
@@ -179,11 +197,8 @@ class AIPlayer:
         self._audio_frames = []
         self._recording = True
 
-        # Take screenshot on first press if flag is on
         self._pending_screenshot = self._take_screenshot() if self.screenshot_flag.enabled else None
-        if self.screenshot_flag.enabled:
-            print(f"[{self.name}] Screenshot captured.")
-        else:
+        if not self.screenshot_flag.enabled:
             print(f"[{self.name}] Screenshot: OFF (skipped)")
 
         self._stream = sd.InputStream(
@@ -257,7 +272,9 @@ class AIPlayer:
                 system=self.personality,
                 messages=[{"role": "user", "content": content}],
             )
-            return response.content[0].text.strip()
+            text = response.content[0].text.strip()
+            self._write_log_file(self.personality, prompt, text)
+            return text
         except Exception as e:
             print(f"[{self.name}] Claude API error: {e}")
             return None

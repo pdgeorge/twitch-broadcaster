@@ -14,3 +14,4 @@ test*
 *.kra
 *.png
 temp/*
+*.txt

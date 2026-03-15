@@ -4,15 +4,15 @@ dnd_session.py
 Main entry point for the D&D AI player system.
 
 Hotkeys:
+  1          → Hivemind (ChatPlayer): mic + chat window simultaneously for listen_seconds
   2          → Dabbert (AIPlayer):  first press = start mic + screenshot,
                                     second press = stop + transcribe + send
-  3          → Hivemind (ChatPlayer): single press = screenshot + open chat window
   0          → Screenshot only (debug, no API call)
   S          → Toggle screenshot mode ON/OFF (any time)
   Ctrl+C     → Exit
 
 Setup:
-  - Copy dabbert.json and chat.json into the same directory
+  - Place dabbert.json and chat.json in the dnd/ directory
   - Fill in .env (see below)
 
 .env keys:
@@ -40,30 +40,30 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # Shared state
 # ---------------------------------------------------------------------------
-session_log    = []          # shared across all players
+session_log     = []
 screenshot_flag = ScreenshotFlag(enabled=True)
 
 # ---------------------------------------------------------------------------
 # Load players
 # ---------------------------------------------------------------------------
 print("=" * 55)
-print("  D&D AI Player System — Cryptid Research Tabletop Unit")
+print("  D&D AI Player System")
 print("=" * 55)
 
-dabbert  = AIPlayer("dabbert.json",  session_log, screenshot_flag)
-hivemind = ChatPlayer("chat.json",   session_log, screenshot_flag)
+dabbert  = AIPlayer("dabbert.json", session_log, screenshot_flag)
+hivemind = ChatPlayer("chat.json", session_log, screenshot_flag)
 
 # ---------------------------------------------------------------------------
 # Hotkey map
 # ---------------------------------------------------------------------------
 CHAR_MAP = {
+    '1': hivemind,
     '2': dabbert,
-    '3': hivemind,
 }
 
 def _screenshot_only():
     """Debug: screenshot with no API call."""
-    import base64, io, os, time
+    import base64, io, time
     from PIL import ImageGrab
     from ai_player import SCREENSHOT_DIR, SCREENSHOT_REGION
     os.makedirs(SCREENSHOT_DIR, exist_ok=True)
@@ -94,14 +94,15 @@ def on_press(key):
 def main():
     print()
     print(f"  Hotkeys:")
+    print(f"    1        → {hivemind.name} (mic + chat window, {hivemind.listen_seconds}s)")
     print(f"    2        → {dabbert.name} (mic toggle)")
-    print(f"    3        → {hivemind.name} (chat window)")
     print(f"    0        → Screenshot only (debug)")
     print(f"    S        → Toggle screenshot ON/OFF")
     print(f"    Ctrl+C   → Exit")
     print()
     print(f"  Screenshot: {'ON' if screenshot_flag.enabled else 'OFF'}")
     print(f"  Session log limit: {dabbert.context_limit} entries (pop {dabbert.pop_count} when full)")
+    print(f"  Log files → {os.path.join(os.path.dirname(__file__), 'logs')}/")
     print()
     print("  Ready. Waiting for hotkeys...\n")
 
