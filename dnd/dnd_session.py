@@ -50,8 +50,8 @@ print("=" * 55)
 print("  D&D AI Player System")
 print("=" * 55)
 
-dabbert  = AIPlayer("dabbert.json", session_log, screenshot_flag)
-hivemind = ChatPlayer("chat.json", session_log, screenshot_flag)
+dabbert  = AIPlayer("dnd/dabbert.json", session_log, screenshot_flag)
+hivemind = ChatPlayer("dnd/chat.json", session_log, screenshot_flag)
 
 # ---------------------------------------------------------------------------
 # Hotkey map

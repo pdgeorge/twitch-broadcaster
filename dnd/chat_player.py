@@ -4,18 +4,18 @@ chat_player.py
 Extends AIPlayer for a Twitch-chat-driven D&D player.
 
 Pressing the hotkey once:
-  1. Takes a screenshot (if enabled)
-  2. Starts mic recording AND opens RabbitMQ chat consumer simultaneously
-  3. Both run for `listen_seconds`
-  4. Mic stops → Whisper transcribes → logged as DM context
-  5. Chat messages are collected and printed as they arrive
-  6. Sends screenshot + session log + transcription + chat to Claude
-  7. TTS + OBS jiggle
+  1. Sends a Twitch chat message announcing the listen window
+  2. Takes a screenshot (if enabled)
+  3. Starts mic recording AND opens RabbitMQ chat consumer simultaneously
+  4. Both run for `listen_seconds`
+  5. Mic stops → Whisper transcribes → logged as DM context
+  6. Chat messages collected and printed as they arrive
+  7. Sends screenshot + session log + transcription + chat to Claude
+  8. TTS + OBS jiggle
 
 Additional JSON fields (on top of AIPlayer fields):
 {
-    "listen_seconds": 30,
-    "min_messages":   3
+    "listen_seconds": 30
 }
 
 Requires the same RabbitMQ setup as background.py.
@@ -29,15 +29,16 @@ import time
 import numpy as np
 import pika
 import sounddevice as sd
-import whisper
 from dotenv import load_dotenv
 
 from ai_player import AIPlayer, ScreenshotFlag, _whisper_model, SAMPLE_RATE, LOG_DIR
 
 load_dotenv()
 
-RABBITMQ_URL = os.getenv("RABBITMQ_URL")
-EXCHANGE     = os.getenv("RABBITMQ_EXCHANGE", "twitch_events")
+RABBITMQ_URL    = os.getenv("RABBITMQ_URL")
+EXCHANGE        = os.getenv("RABBITMQ_EXCHANGE", "twitch_events")
+COMMAND_EXCHANGE = os.getenv("RABBITMQ_COMMAND_EXCHANGE", "twitch_commands")
+BROADCASTER_ID  = os.getenv("BROADCASTER_ID")
 
 
 class ChatPlayer(AIPlayer):
@@ -48,10 +49,33 @@ class ChatPlayer(AIPlayer):
             cfg = json.load(f)
 
         self.listen_seconds: int = cfg.get("listen_seconds", 30)
-        self.min_messages:   int = cfg.get("min_messages", 3)
 
         self._chat_busy = threading.Lock()
-        print(f"[{self.name}] Chat mode — listen window: {self.listen_seconds}s, min messages: {self.min_messages}")
+        print(f"[{self.name}] Chat mode — listen window: {self.listen_seconds}s")
+
+    # ------------------------------------------------------------------
+    # Twitch chat announcement
+    # ------------------------------------------------------------------
+    def _send_chat_message(self, message: str) -> None:
+        """Publish a message to Twitch chat via the overlay_controller exchange."""
+        try:
+            print(f"in _send_chat_message: {message=}")
+            params = pika.URLParameters(RABBITMQ_URL)
+            conn = pika.BlockingConnection(params)
+            ch = conn.channel()
+            ch.basic_publish(
+                exchange=COMMAND_EXCHANGE,
+                routing_key="",
+                body=json.dumps({
+                    "channel_id": BROADCASTER_ID,
+                    "message":    message,
+                }),
+                properties=pika.BasicProperties(type="channel.command.send_chat"),
+            )
+            conn.close()
+            print(f"[{self.name}] 📣 Sent to Twitch chat: \"{message}\"")
+        except Exception as e:
+            print(f"[{self.name}] Failed to send Twitch chat message (non-fatal): {e}")
 
     # ------------------------------------------------------------------
     # Override hotkey — single press triggers mic + chat window together
@@ -102,7 +126,7 @@ class ChatPlayer(AIPlayer):
         """
         Open a temporary exclusive queue on the fanout exchange,
         collect chat messages until stop_event is set.
-        Returns list of {"user": ..., "text": ...} dicts.
+        Returns a live-filling list of {"user": ..., "text": ...} dicts.
         """
         collected = []
 
@@ -150,14 +174,14 @@ class ChatPlayer(AIPlayer):
 
         consumer_thread = threading.Thread(target=_consume, daemon=True)
         consumer_thread.start()
-        return collected  # live-filling list, caller reads after stop_event is set
+        return collected
 
     # ------------------------------------------------------------------
     # Build the chat synthesis prompt
     # ------------------------------------------------------------------
     def _build_chat_prompt(self, transcription: str, chat_messages: list[dict]) -> str:
         log_text = self._format_log()
-        chat_block = "\n".join(f"  {m['user']}: {m['text']}" for m in chat_messages) or "  (no messages)"
+        chat_block = "\n".join(f"  {m['text']}" for m in chat_messages) or "  (no messages)"
 
         prompt = (
             f"=== SESSION LOG ===\n{log_text}\n\n"
@@ -216,31 +240,35 @@ class ChatPlayer(AIPlayer):
     # ------------------------------------------------------------------
     def _chat_pipeline(self) -> None:
         try:
-            # 1. Screenshot
+            # 1. Announce to Twitch chat
+            self._send_chat_message(
+                f"{self.name} is now listening to you! "
+                f"Anything you say for the next {self.listen_seconds} seconds "
+                f"tells {self.name} what to do!"
+            )
+            time.sleep(1)
+
+            # 2. Screenshot
             img_b64 = self._take_screenshot() if self.screenshot_flag.enabled else None
             if not self.screenshot_flag.enabled:
                 print(f"[{self.name}] Screenshot: OFF (skipped)")
 
-            # 2. Start chat collection (runs in background thread, filling list live)
+            # 3. Start chat collection (background thread, live-filling list)
             stop_event = threading.Event()
             print(f"[{self.name}] 🟢 Chat window OPEN — collecting for {self.listen_seconds}s...")
             chat_messages = self._collect_chat(stop_event)
 
-            # 3. Record mic for the same duration (blocks for listen_seconds)
+            # 4. Record mic for the same duration (blocks for listen_seconds)
             transcription = self._record_for_duration()
 
-            # 4. Stop chat consumer
+            # 5. Stop chat consumer
             stop_event.set()
             print(f"[{self.name}] Chat window CLOSED. Collected {len(chat_messages)} message(s).")
 
-            if len(chat_messages) < self.min_messages:
-                print(f"[{self.name}] Only {len(chat_messages)} message(s) — below min_messages "
-                      f"({self.min_messages}). Proceeding anyway.")
-
-            # 5. Log DM transcription into session log
+            # 6. Log DM transcription
             self._append_log("DM", transcription)
 
-            # 6. Claude call
+            # 7. Claude call
             response = self._claude_call_chat(transcription, chat_messages, img_b64)
             if not response:
                 return
@@ -248,7 +276,7 @@ class ChatPlayer(AIPlayer):
             print(f"[{self.name}] Response: \"{response}\"")
             self._append_log(self.name, response)
 
-            # 7. TTS + jiggle
+            # 8. TTS + jiggle
             self._speak(response)
 
         finally:
