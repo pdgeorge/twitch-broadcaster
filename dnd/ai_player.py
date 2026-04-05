@@ -50,6 +50,8 @@ load_dotenv()
 
 ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY")
 OBS_JIGGLE_SOURCE  = os.getenv("OBS_JIGGLE_SOURCE", "HorseIcon")
+DISCORD_EXCHANGE   = os.getenv("DISCORD_EXCHANGE", "discord_events")
+RABBITMQ_URL       = os.getenv("RABBITMQ_URL")
 SCREENSHOT_REGION  = (0, 0, 1920, 1080)
 SCREENSHOT_DIR     = "./temp/dnd_screenshots"
 LOG_DIR            = "./logs"
@@ -112,8 +114,29 @@ def _obs_jiggle(envelope: list[tuple[float, float]], player: vlc.MediaPlayer, so
 
 
 # ---------------------------------------------------------------------------
-# AIPlayer base class
+# Publish tts.ready to discord_events exchange
 # ---------------------------------------------------------------------------
+def _publish_tts_ready(path: str) -> None:
+    """Notify the Discord bot that a TTS file is ready to play."""
+    try:
+        import pika as _pika
+        params = _pika.URLParameters(RABBITMQ_URL)
+        conn = _pika.BlockingConnection(params)
+        ch = conn.channel()
+        ch.exchange_declare(exchange=DISCORD_EXCHANGE, exchange_type="fanout", durable=True)
+        ch.basic_publish(
+            exchange=DISCORD_EXCHANGE,
+            routing_key="",
+            body=json.dumps({"path": path}),
+            properties=_pika.BasicProperties(type="tts.ready"),
+        )
+        conn.close()
+        print(f"[Discord] Published tts.ready → {path}")
+    except Exception as e:
+        print(f"[Discord] Failed to publish tts.ready (non-fatal): {e}")
+
+
+
 class AIPlayer:
     def __init__(self, config_path: str, session_log: list, screenshot_flag: "ScreenshotFlag") -> None:
         with open(config_path, "r", encoding="utf-8") as f:
@@ -298,6 +321,9 @@ class AIPlayer:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
             return
+
+        # Notify Discord bot
+        _publish_tts_ready(os.path.abspath(tmp_path))
 
         envelope = _extract_envelope(tmp_path)
         player = vlc.MediaPlayer(tmp_path)

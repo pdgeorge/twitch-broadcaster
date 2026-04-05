@@ -104,7 +104,10 @@ class ChatPlayer(AIPlayer):
         )
         stream.start()
         print(f"[{self.name}] 🎙  Mic recording for {self.listen_seconds}s...")
-        time.sleep(self.listen_seconds)
+        for remaining in range(self.listen_seconds, 0, -1):
+            time.sleep(1)
+            if remaining % 10 == 0:
+                print(f"[{self.name}] ⏱  {remaining}s remaining...")
         stream.stop()
         stream.close()
         print(f"[{self.name}] 🎙  Mic stopped. Transcribing...")
