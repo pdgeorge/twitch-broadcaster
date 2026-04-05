@@ -4,9 +4,12 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
+    env_file:
+      - .env
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://overlay:strongpassword@rabbitmq:5672/}
     healthcheck:
       test: ["CMD", "rabbitmqctl", "status"]
       interval: 10s
@@ -26,7 +29,7 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672/}
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://overlay:strongpassword@rabbitmq:5672/}
     restart: unless-stopped
     networks:
       - twitchbroadcaster_net
@@ -36,7 +39,7 @@ services:
     env_file:
       - .env
     environment:
-      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672/}
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://overlay:strongpassword@rabbitmq:5672/}
       RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE:-twitch_events}
       OVERLAY_QUEUE: ${OVERLAY_QUEUE:-overlay_chat}
       OVERLAY_HTTP_PORT: ${OVERLAY_HTTP_PORT:-8080}

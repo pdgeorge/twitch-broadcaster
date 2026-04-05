@@ -11,26 +11,26 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"strconv"
 
-	_ "github.com/go-sql-driver/mysql"
-	"github.com/gorilla/websocket"
-	amqp "github.com/rabbitmq/amqp091-go"
-	"github.com/yuin/goldmark"
+        "github.com/gorilla/websocket"
+        amqp "github.com/rabbitmq/amqp091-go"
+        "github.com/yuin/goldmark"
+        _ "github.com/go-sql-driver/mysql"
 )
 
 type config struct {
-	rabbitURL       string
-	rabbitExchange  string
+	rabbitURL      string
+	rabbitExchange string
 	commandExchange string
-	queueName       string
-	httpPort        string
-	staticDir       string
-	mysqlDSN        string
+	queueName      string
+	httpPort       string
+	staticDir      string
+	mysqlDSN       string
 }
 
 type chatFragment struct {
@@ -68,8 +68,8 @@ type loginStore struct {
 }
 
 type botCommandStore struct {
-	db       *sql.DB
-	mu       sync.RWMutex
+	db      *sql.DB
+	mu      sync.RWMutex
 	commands map[string]string // trigger (lowercase) -> response
 }
 
@@ -258,12 +258,12 @@ func (s *loginStore) increment(ctx context.Context, userID, userLogin string) (i
 func (s *botCommandStore) init(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 	CREATE TABLE IF NOT EXISTS bot_commands (
-	trigger      VARCHAR(64)  NOT NULL,
+	` + "`trigger`" + `      VARCHAR(64)  NOT NULL,
 	response     TEXT         NOT NULL,
 	created_by   VARCHAR(64)  NOT NULL,
 	created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-	PRIMARY KEY (trigger)
+	PRIMARY KEY (` + "`trigger`" + `)
 	)`)
 	if err != nil {
 		return err
@@ -272,7 +272,7 @@ func (s *botCommandStore) init(ctx context.Context) error {
 }
 
 func (s *botCommandStore) loadAll(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT trigger, response FROM bot_commands`)
+	rows, err := s.db.QueryContext(ctx, "SELECT `trigger`, response FROM bot_commands")
 	if err != nil {
 		return err
 	}
@@ -297,20 +297,14 @@ func (s *botCommandStore) loadAll(ctx context.Context) error {
 
 // set upserts a command into the DB and, if verified, updates the in-memory map.
 func (s *botCommandStore) set(ctx context.Context, trigger, response, createdBy string) error {
-	_, err := s.db.ExecContext(ctx, `
-	INSERT INTO bot_commands (trigger, response, created_by)
-	VALUES (?, ?, ?)
-	ON DUPLICATE KEY UPDATE
-	  response   = VALUES(response),
-	  created_by = VALUES(created_by)
-	`, trigger, response, createdBy)
+	_, err := s.db.ExecContext(ctx, "INSERT INTO bot_commands (`trigger`, response, created_by) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE response = VALUES(response), created_by = VALUES(created_by)", trigger, response, createdBy)
 	if err != nil {
 		return err
 	}
 
 	// Verify it's actually in the DB before updating the in-memory map.
 	var got string
-	row := s.db.QueryRowContext(ctx, `SELECT response FROM bot_commands WHERE trigger = ?`, trigger)
+	row := s.db.QueryRowContext(ctx, "SELECT response FROM bot_commands WHERE `trigger` = ?", trigger)
 	if err := row.Scan(&got); err != nil {
 		return fmt.Errorf("verification failed after set: %w", err)
 	}
@@ -323,14 +317,14 @@ func (s *botCommandStore) set(ctx context.Context, trigger, response, createdBy 
 
 // delete removes a command from the DB and, if confirmed gone, removes it from the in-memory map.
 func (s *botCommandStore) delete(ctx context.Context, trigger string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM bot_commands WHERE trigger = ?`, trigger)
+	_, err := s.db.ExecContext(ctx, "DELETE FROM bot_commands WHERE `trigger` = ?", trigger)
 	if err != nil {
 		return err
 	}
 
 	// Verify it's actually gone before touching the map.
 	var dummy string
-	row := s.db.QueryRowContext(ctx, `SELECT response FROM bot_commands WHERE trigger = ?`, trigger)
+	row := s.db.QueryRowContext(ctx, "SELECT response FROM bot_commands WHERE `trigger` = ?", trigger)
 	if scanErr := row.Scan(&dummy); scanErr == nil {
 		return fmt.Errorf("verification failed after delete: row still exists")
 	} else if scanErr != sql.ErrNoRows {
@@ -659,13 +653,13 @@ func main() {
 
 func loadConfig() config {
 	return config{
-		rabbitURL:       env("RABBITMQ_URL", "amqp://guest:guest@twitch_broadcaster:5672/"),
-		rabbitExchange:  env("RABBITMQ_EXCHANGE", "twitch_events"),
+		rabbitURL:      env("RABBITMQ_URL", "amqp://guest:guest@twitch_broadcaster:5672/"),
+		rabbitExchange: env("RABBITMQ_EXCHANGE", "twitch_events"),
 		commandExchange: env("RABBITMQ_COMMAND_EXCHANGE", "twitch_commands"),
-		queueName:       env("OVERLAY_QUEUE", "overlay_chat"),
-		httpPort:        env("OVERLAY_HTTP_PORT", "8080"),
-		staticDir:       env("OVERLAY_STATIC_DIR", "./overlay"),
-		mysqlDSN:        env("MYSQL_DSN", "echoes:echoespw@tcp(mysql:3306)/echoes?parseTime=true"),
+		queueName:      env("OVERLAY_QUEUE", "overlay_chat"),
+		httpPort:       env("OVERLAY_HTTP_PORT", "8080"),
+		staticDir:      env("OVERLAY_STATIC_DIR", "./overlay"),
+		mysqlDSN:		env("MYSQL_DSN", "echoes:echoespw@tcp(mysql:3306)/echoes?parseTime=true"),
 	}
 }
 
@@ -959,19 +953,20 @@ func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub,
 				username := firstString(event["chatter_user_login"], event["chatter_user_name"], "mod")
 				broadcasterID := firstString(event["broadcaster_user_id"], "")
 				opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				defer cancel()
 				if err := botCommands.set(opCtx, trigger, response, username); err != nil {
+					cancel()
 					log.Printf("bot_commands: failed to add %q: %v", trigger, err)
 					if broadcasterID != "" {
-						_ = commands.publish(opCtx, "channel.command.send_chat", map[string]any{
+						_ = commands.publish(ctx, "channel.command.send_chat", map[string]any{
 							"channel_id": broadcasterID,
 							"message":    fmt.Sprintf("Unable to add %s", trigger),
 						})
 					}
 				} else {
+					cancel()
 					log.Printf("bot_commands: added %q by %s", trigger, username)
 					if broadcasterID != "" {
-						_ = commands.publish(opCtx, "channel.command.send_chat", map[string]any{
+						_ = commands.publish(ctx, "channel.command.send_chat", map[string]any{
 							"channel_id": broadcasterID,
 							"message":    fmt.Sprintf("Added the %s command.", trigger),
 						})
@@ -985,19 +980,20 @@ func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub,
 			trigger := strings.ToLower(strings.TrimSpace(messageText[len("#d "):]))
 			broadcasterID := firstString(event["broadcaster_user_id"], "")
 			opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			defer cancel()
 			if err := botCommands.delete(opCtx, trigger); err != nil {
+				cancel()
 				log.Printf("bot_commands: failed to delete %q: %v", trigger, err)
 				if broadcasterID != "" {
-					_ = commands.publish(opCtx, "channel.command.send_chat", map[string]any{
+					_ = commands.publish(ctx, "channel.command.send_chat", map[string]any{
 						"channel_id": broadcasterID,
 						"message":    fmt.Sprintf("Unable to delete %s", trigger),
 					})
 				}
 			} else {
+				cancel()
 				log.Printf("bot_commands: deleted %q", trigger)
 				if broadcasterID != "" {
-					_ = commands.publish(opCtx, "channel.command.send_chat", map[string]any{
+					_ = commands.publish(ctx, "channel.command.send_chat", map[string]any{
 						"channel_id": broadcasterID,
 						"message":    fmt.Sprintf("Deleted the %s command.", trigger),
 					})
@@ -1012,13 +1008,13 @@ func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub,
 			broadcasterID := firstString(event["broadcaster_user_id"], "")
 			if broadcasterID != "" {
 				opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				defer cancel()
 				if err := commands.publish(opCtx, "channel.command.send_chat", map[string]any{
 					"channel_id": broadcasterID,
 					"message":    response,
 				}); err != nil {
 					log.Printf("bot_commands: failed to respond to %q: %v", lower, err)
 				}
+				cancel()
 			}
 		}
 	}
@@ -1061,10 +1057,10 @@ func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherMa
 			log.Print("daily login bonus redemption missing user_id")
 			return
 		}
-
+		
 		opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-
+		
 		count, err := store.increment(opCtx, userID, userLogin)
 		if err != nil {
 			log.Printf("failed to increment login count for %s: %v", userID, err)
