@@ -80,18 +80,6 @@ services:
     networks:
       - twitchbroadcaster_net
 
-  ollama:
-    image: ollama/ollama
-    container_name: ollama
-    ports:
-      - "11434:11434"
-    restart: unless-stopped
-    volumes:
-      - ollama_data:/root/.ollama
-    networks:
-      - twitchbroadcaster_net
-      - dabidotcom_net
-
 volumes:
   tokens:
   mysql_data:
