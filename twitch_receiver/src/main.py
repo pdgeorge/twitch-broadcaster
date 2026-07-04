@@ -269,7 +269,7 @@ class TwitchEventSubClient:
         return reconnect_url
 
     async def listen(self) -> None:
-        backoff_gen = backoff.expo(base=2, factor=0.5)
+        backoff_gen = backoff.expo(base=2, factor=0.5, max_value=60)
         reconnect_url: str | None = None
         while True:
             try:
@@ -278,6 +278,8 @@ class TwitchEventSubClient:
                 async with session.ws_connect(url, heartbeat=20) as ws:
                     LOGGER.info("Connected to Twitch EventSub socket")
                     reconnect_url = None
+                    # Connected — reset the backoff so the next failure starts small again
+                    backoff_gen = backoff.expo(base=2, factor=0.5, max_value=60)
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             data = json.loads(msg.data)
@@ -301,8 +303,18 @@ class TwitchEventSubClient:
 
 
 async def schedule_token_refresh(manager: TokenManager, session: aiohttp.ClientSession) -> None:
+    retry_delay = 30
     while True:
-        tokens = await manager.refresh(session)
+        try:
+            tokens = await manager.refresh(session)
+        except Exception as exc:
+            # A transient failure must not kill this task — tokens would
+            # silently expire hours later. Retry with easing instead.
+            LOGGER.error("Token refresh failed: %s. Retrying in %ds", exc, retry_delay)
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 600)
+            continue
+        retry_delay = 30
         refresh_in = max(int(tokens.expires_in * 0.8), 300)
         await asyncio.sleep(refresh_in)
 
