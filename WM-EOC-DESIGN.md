@@ -156,9 +156,13 @@ No log-curve exp multiplier (veterans are allowed to dominate — community lore
 
 - "Chatters fight as one mob led by Dabi" is not *rejected*, but it's a different loop from the possessed party of 4 — parked as its own future milestone, see §11.2.
 
-## 9. TTS (post-MVP, unchanged from v1)
+## 9. TTS (browser-source architecture, decided 2026-07-11)
 
-Possessed characters' messages get TTS with a voice tier tied to logins. `tiktok_tts.py` already exists in the repo with a voice-name registry and handles arbitrary-length text via chunking — implementing this is mostly wiring, not building TTS from scratch. Specific voice is chosen based on chatters username. Implemented as another consumer on `twitch_events` (same pattern as `background.py`), publishing audio locally on the streaming PC — keeps the Pi build clean.
+Possessed party members' non-command chat messages are spoken aloud. Where the audio plays from: **the OBS browser source** — not a separate consumer on the streaming PC (the original plan; rejected because it's a second always-running process that fails silently when forgotten on stream day, routes through desktop audio instead of an OBS mixer channel, and can't sync with overlay visuals).
+
+Pipeline: chat message from a possessed member → `overlay_controller` POSTs `{text, voice}` to the `tts_service` container (wraps `tiktok_tts.py`: TikTok API, chunking, ffmpeg concat; needs `TIKTOK_SESSION_ID` in `.env`) → controller caches the returned mp3 in memory (last 50 clips) and serves it at `/tts/<id>.mp3` → broadcasts `tts.play {name, url, duration}` over `/ws/overlay` → overlay queues clips and plays them sequentially, so voices never talk over each other. OBS setup: tick "Control audio via OBS" on the browser source for a dedicated mixer channel, and Monitor-and-Output to hear it live.
+
+Voice selection: the voice pool grows with logins — everyone gets the 10 plain voices; 10+ logins add the narrator set; 30+ logins add the character voices (ghostface, stormtrooper, rocket, c3po, chewbacca, deadpool). Within the unlocked pool the specific voice is a stable hash of the username, so a chatter always sounds like themselves — until crossing a tier grows their pool and may reshuffle who they sound like (feature, not bug: leveling up your voice).
 
 ## 10. Milestones
 

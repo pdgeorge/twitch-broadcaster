@@ -27,6 +27,22 @@
     });
   }
 
+  const ttsQueue = [];
+  let ttsPlaying = false;
+
+  function playNextTTS() {
+    const next = ttsQueue.shift();
+    if (!next) {
+      ttsPlaying = false;
+      return;
+    }
+    ttsPlaying = true;
+    const audio = new Audio(next.url);
+    audio.onended = playNextTTS;
+    audio.onerror = playNextTTS;
+    audio.play().catch(playNextTTS);
+  }
+
   const emoteStores = {
     bttv: { global: new Map(), channels: new Map(), globalLoaded: false },
     ffz: { global: new Map(), channels: new Map(), globalLoaded: false },
@@ -264,6 +280,11 @@
 
         if (payload.type === 'party.update') {
           renderPartyCards(payload.members);
+        }
+
+        if (payload.type === 'tts.play') {
+          ttsQueue.push(payload);
+          if (!ttsPlaying) playNextTTS();
         }
       } catch (err) {
         console.error('Failed to parse message', err);

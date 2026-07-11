@@ -34,6 +34,16 @@ services:
     networks:
       - twitchbroadcaster_net
 
+  tts_service:
+    build: ./tts_service
+    env_file:
+      - .env
+    environment:
+      TIKTOK_SESSION_ID: ${TIKTOK_SESSION_ID:-}
+    restart: unless-stopped
+    networks:
+      - twitchbroadcaster_net
+
   overlay_controller:
     build: ./overlay_controller
     env_file:
@@ -44,6 +54,7 @@ services:
       OVERLAY_QUEUE: ${OVERLAY_QUEUE:-overlay_chat}
       OVERLAY_HTTP_PORT: ${OVERLAY_HTTP_PORT:-8080}
       OVERLAY_STATIC_DIR: /app/overlay
+      TTS_SERVICE_URL: http://tts_service:8081
     volumes:
       - ./overlay:/app/overlay:ro
       - ./data:/data
@@ -55,6 +66,8 @@ services:
       mysql:
         condition: service_healthy
       twitch_receiver:
+        condition: service_started
+      tts_service:
         condition: service_started
     restart: unless-stopped
     networks:
