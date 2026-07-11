@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 220" width="400" height="220">
+  <!-- Crude placeholder backdrop, not wired into index.html yet — final
+       geometry is TBD once the real background art exists (see DESIGN.md
+       §2/§9). Kept here so there's something to preview against. -->
+  <rect x="20" y="90" width="360" height="120" fill="#6b4a2f" />
+  <polygon points="10,95 200,20 390,95" fill="#7a2e2e" />
+  <rect x="20" y="88" width="360" height="10" fill="#4a3320" />
+  <rect x="170" y="150" width="60" height="60" fill="#3a2718" />
+  <rect x="196" y="150" width="4" height="60" fill="#2a1c10" />
+  <rect x="60" y="130" width="36" height="36" fill="#f2d98a" opacity="0.85" />
+  <rect x="60" y="130" width="36" height="36" fill="none" stroke="#3a2718" stroke-width="3" />
+  <rect x="304" y="130" width="36" height="36" fill="#f2d98a" opacity="0.85" />
+  <rect x="304" y="130" width="36" height="36" fill="none" stroke="#3a2718" stroke-width="3" />
+  <text x="200" y="70" text-anchor="middle" font-family="serif" font-size="20" fill="#f2d98a">TAVERN</text>
+</svg>

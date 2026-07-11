@@ -1,8 +1,31 @@
 (function () {
   const chatBox = document.getElementById('chat-box');
   const otherBox = document.getElementById('other-box');
+  const partyCardsBox = document.getElementById('party-cards');
   let otherBaseHTML = '';
   let pongActive = false;
+
+  function renderPartyCards(members) {
+    partyCardsBox.innerHTML = '';
+    (members || []).forEach((member) => {
+      const hpPct = member.max_hp > 0 ? Math.max(0, Math.min(100, (member.hp / member.max_hp) * 100)) : 0;
+      const expPct = member.exp_next > 0 ? Math.max(0, Math.min(100, (member.exp / member.exp_next) * 100)) : 0;
+      const hue = (member.variant || 0) * 40;
+
+      const card = document.createElement('div');
+      card.className = 'party-card';
+      card.innerHTML = `
+        <img class="avatar" src="assets/dude.svg" style="filter: hue-rotate(${hue}deg)" alt="${escapeHTML(member.name || '')}" />
+        <div class="name">${escapeHTML(member.name || '')}</div>
+        <div class="level">Lv ${member.level ?? 1}</div>
+        <div class="bar"><div class="bar-fill hp-fill" style="width:${hpPct}%"></div></div>
+        <div class="bar-label">${member.hp ?? 0}/${member.max_hp ?? 0} hp</div>
+        <div class="bar"><div class="bar-fill exp-fill" style="width:${expPct}%"></div></div>
+        <div class="bar-label">${member.exp ?? 0}/${member.exp_next ?? 0} exp</div>
+      `;
+      partyCardsBox.appendChild(card);
+    });
+  }
 
   const emoteStores = {
     bttv: { global: new Map(), channels: new Map(), globalLoaded: false },
@@ -237,6 +260,10 @@
 
         if (payload.type === 'other.pong_frame' && pongActive) {
           setOtherContent(payload.html || '');
+        }
+
+        if (payload.type === 'party.update') {
+          renderPartyCards(payload.members);
         }
       } catch (err) {
         console.error('Failed to parse message', err);
