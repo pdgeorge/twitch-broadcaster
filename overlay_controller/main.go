@@ -5,9 +5,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"hash/fnv"
 	"html"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -20,7 +23,7 @@ import (
         "github.com/gorilla/websocket"
         amqp "github.com/rabbitmq/amqp091-go"
         "github.com/yuin/goldmark"
-        _ "github.com/go-sql-driver/mysql"
+        "github.com/go-sql-driver/mysql"
 )
 
 type config struct {
@@ -81,6 +84,9 @@ type commandPublisher struct {
 }
 
 const dailyLoginRewardTitle = "daily login bonus"
+const joinPartyRewardTitle = "join the party"
+const partyMaxSize = 4
+const expCooldownDuration = 45 * time.Second
 
 func newOverlayHub() *overlayHub {
 	return &overlayHub{
@@ -253,6 +259,170 @@ func (s *loginStore) increment(ctx context.Context, userID, userLogin string) (i
 		return 0, err
 	}
 	return count, nil
+}
+
+// character is the West Marches character sheet for one chatter, backed by
+// the chatters table. Exp/hp/level/alive/money/cosmetics are the live values;
+// mutations always write straight back to MySQL (no batching).
+type character struct {
+	UserID    int64
+	Name      string
+	Logins    int64
+	Exp       int64
+	Level     int
+	HP        int
+	MaxHP     int
+	Alive     bool
+	Money     int64
+	Cosmetics []string
+}
+
+// totalExpForLevel is the cumulative exp required to *reach* level, using a
+// triangular curve anchored at level 2 = 10 exp: total(L) = 5*L*(L-1). Cost
+// per level grows linearly (10, 20, 30, ...), so total exp grows quadratically
+// — quick early levels, a real grind for veterans, never literally unreachable
+// the way a compounding-exponential curve would be. See DESIGN.md §3.
+func totalExpForLevel(level int) int64 {
+	l := int64(level)
+	return 5 * l * (l - 1)
+}
+
+// levelForExp inverts totalExpForLevel by solving 5*L^2 - 5*L - exp = 0 for L.
+func levelForExp(exp int64) int {
+	if exp < 0 {
+		exp = 0
+	}
+	l := (5.0 + math.Sqrt(25.0+20.0*float64(exp))) / 10.0
+	level := int(math.Floor(l + 1e-9)) // epsilon guards float error landing just under an exact threshold
+	if level < 1 {
+		level = 1
+	}
+	return level
+}
+
+func (c *character) expNext() int64 {
+	return totalExpForLevel(c.Level + 1)
+}
+
+// applyExp recomputes level/max_hp/hp after an exp change. Level-up restores
+// HP to the new max; level never decreases HP below the (possibly lower) cap.
+func (c *character) applyExp(delta int64) {
+	c.Exp += delta
+	if c.Exp < 0 {
+		c.Exp = 0
+	}
+	newLevel := levelForExp(c.Exp)
+	leveledUp := newLevel > c.Level
+	c.Level = newLevel
+	c.MaxHP = 10 + c.Level*4
+	if leveledUp {
+		c.HP = c.MaxHP
+	} else if c.HP > c.MaxHP {
+		c.HP = c.MaxHP
+	}
+}
+
+// spriteVariant is the deterministic tavern-sprite tint index used until a
+// chatter has explicit cosmetics: hash(username) % 9.
+func spriteVariant(name string) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(strings.ToLower(name)))
+	return int(h.Sum32() % 9)
+}
+
+type characterStore struct {
+	db *sql.DB
+}
+
+func newCharacterStore(db *sql.DB) *characterStore {
+	return &characterStore{db: db}
+}
+
+func (s *characterStore) init(ctx context.Context) error {
+	// MySQL 8 has no ADD COLUMN IF NOT EXISTS (MariaDB-only), so add columns
+	// one at a time and treat error 1060 (duplicate column) as already migrated.
+	columns := []string{
+		"level  INT  NOT NULL DEFAULT 1",
+		"hp     INT  NOT NULL DEFAULT 14",
+		"max_hp INT  NOT NULL DEFAULT 14",
+		"alive  TINYINT(1) NOT NULL DEFAULT 1",
+		"sheet  JSON NULL",
+	}
+	for _, col := range columns {
+		if _, err := s.db.ExecContext(ctx, "ALTER TABLE chatters ADD COLUMN "+col); err != nil {
+			var mysqlErr *mysql.MySQLError
+			if errors.As(err, &mysqlErr) && mysqlErr.Number == 1060 {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func scanCharacter(row *sql.Row) (*character, error) {
+	var c character
+	var cosmeticsJSON sql.NullString
+	var alive bool
+	if err := row.Scan(&c.UserID, &c.Name, &c.Logins, &c.Exp, &c.Money, &cosmeticsJSON, &c.Level, &c.HP, &c.MaxHP, &alive); err != nil {
+		return nil, err
+	}
+	c.Alive = alive
+	if cosmeticsJSON.Valid && cosmeticsJSON.String != "" && cosmeticsJSON.String != "null" {
+		_ = json.Unmarshal([]byte(cosmeticsJSON.String), &c.Cosmetics)
+	}
+	return &c, nil
+}
+
+const characterSelectColumns = "twitch_chatter_id, twitch_chatter_name, logins, exp, money, cosmetics, level, hp, max_hp, alive"
+
+// getOrCreate ensures a chatters row exists for userID, then returns the
+// full character sheet. userLogin is used only to seed/refresh the name.
+func (s *characterStore) getOrCreate(ctx context.Context, userID, userLogin string) (*character, error) {
+	id, err := strconv.ParseInt(userID, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid userID %q: %w", userID, err)
+	}
+
+	_, err = s.db.ExecContext(ctx, `
+	INSERT INTO chatters (twitch_chatter_id, twitch_chatter_name, last_seen_at)
+	VALUES (?, ?, NOW())
+	ON DUPLICATE KEY UPDATE
+	  twitch_chatter_name = VALUES(twitch_chatter_name),
+	  last_seen_at = NOW()
+	`, id, userLogin)
+	if err != nil {
+		return nil, err
+	}
+
+	row := s.db.QueryRowContext(ctx, "SELECT "+characterSelectColumns+" FROM chatters WHERE twitch_chatter_id = ?", id)
+	return scanCharacter(row)
+}
+
+// getByName looks up a character by chatter name (case-insensitive), for DM
+// commands that only have a username to go on. Returns nil, nil if unknown.
+func (s *characterStore) getByName(ctx context.Context, name string) (*character, error) {
+	row := s.db.QueryRowContext(ctx, "SELECT "+characterSelectColumns+" FROM chatters WHERE twitch_chatter_name = ? LIMIT 1", name)
+	c, err := scanCharacter(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (s *characterStore) save(ctx context.Context, c *character) error {
+	cosmeticsJSON, err := json.Marshal(c.Cosmetics)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+	UPDATE chatters SET exp = ?, money = ?, cosmetics = ?, level = ?, hp = ?, max_hp = ?, alive = ?
+	WHERE twitch_chatter_id = ?
+	`, c.Exp, c.Money, string(cosmeticsJSON), c.Level, c.HP, c.MaxHP, c.Alive, c.UserID)
+	return err
 }
 
 func (s *botCommandStore) init(ctx context.Context) error {
@@ -594,6 +764,166 @@ func startPongTicker(ctx context.Context, other *otherManager) {
 	}
 }
 
+// broadcastJSON marshals obj and pushes it to every connected overlay client.
+func broadcastJSON(hub *overlayHub, obj any) {
+	data, err := json.Marshal(obj)
+	if err != nil {
+		log.Printf("failed to encode broadcast payload: %v", err)
+		return
+	}
+	select {
+	case hub.broadcast <- data:
+	default:
+		log.Print("dropping broadcast payload: channel full")
+	}
+}
+
+// partyManager holds the active possessed party (max partyMaxSize) in memory.
+// Membership only changes on a successful "join the party" redemption or the
+// DM commands !kick / !newparty — there is deliberately no expiry timer.
+type partyManager struct {
+	mu      sync.Mutex
+	hub     *overlayHub
+	members []*character
+}
+
+func newPartyManager(hub *overlayHub) *partyManager {
+	return &partyManager{hub: hub}
+}
+
+type partyMemberPayload struct {
+	Name    string `json:"name"`
+	Level   int    `json:"level"`
+	HP      int    `json:"hp"`
+	MaxHP   int    `json:"max_hp"`
+	Exp     int64  `json:"exp"`
+	ExpNext int64  `json:"exp_next"`
+	Variant int    `json:"variant"`
+	Status  string `json:"status"`
+}
+
+func (p *partyManager) broadcastLocked() {
+	members := make([]partyMemberPayload, 0, len(p.members))
+	for _, c := range p.members {
+		members = append(members, partyMemberPayload{
+			Name: c.Name, Level: c.Level, HP: c.HP, MaxHP: c.MaxHP,
+			Exp: c.Exp, ExpNext: c.expNext(), Variant: spriteVariant(c.Name), Status: "possessed",
+		})
+	}
+	broadcastJSON(p.hub, map[string]any{"type": "party.update", "members": members})
+}
+
+func (p *partyManager) findLocked(name string) (int, *character) {
+	lname := strings.ToLower(name)
+	for i, c := range p.members {
+		if strings.ToLower(c.Name) == lname {
+			return i, c
+		}
+	}
+	return -1, nil
+}
+
+// join adds c to the party if there's room and it's alive. Returns a
+// human-readable refusal reason, or "" on success.
+func (p *partyManager) join(c *character) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !c.Alive {
+		return "your character is dead and can't rejoin until the DM revives them"
+	}
+	if _, existing := p.findLocked(c.Name); existing != nil {
+		return "you're already in the party"
+	}
+	if len(p.members) >= partyMaxSize {
+		return "the party is full (4/4) — ask the DM to !newparty"
+	}
+	p.members = append(p.members, c)
+	broadcastJSON(p.hub, map[string]any{"type": "tavern.possess", "name": c.Name})
+	p.broadcastLocked()
+	return ""
+}
+
+// findInParty returns the live in-party character by name (nil if absent) so
+// DM commands mutate the copy that's about to be re-broadcast, not a stale one.
+func (p *partyManager) findInParty(name string) *character {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, c := p.findLocked(name)
+	return c
+}
+
+// kick removes one member by name (normal return to the tavern, not death).
+func (p *partyManager) kick(name string) *character {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	idx, c := p.findLocked(name)
+	if c == nil {
+		return nil
+	}
+	p.members = append(p.members[:idx], p.members[idx+1:]...)
+	broadcastJSON(p.hub, map[string]any{"type": "tavern.return", "name": c.Name})
+	p.broadcastLocked()
+	return c
+}
+
+// removeForDeath removes a member without the "return" animation — the
+// caller sends tavern.death instead. No-op if the character wasn't in the party.
+func (p *partyManager) removeForDeath(name string) *character {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	idx, c := p.findLocked(name)
+	if c == nil {
+		return nil
+	}
+	p.members = append(p.members[:idx], p.members[idx+1:]...)
+	p.broadcastLocked()
+	return c
+}
+
+// newParty ejects everyone and reopens all slots.
+func (p *partyManager) newParty() []*character {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ejected := p.members
+	p.members = nil
+	for _, c := range ejected {
+		broadcastJSON(p.hub, map[string]any{"type": "tavern.return", "name": c.Name})
+	}
+	p.broadcastLocked()
+	return ejected
+}
+
+// notifyChange re-broadcasts party.update after a DM command mutates a
+// member already in the party in place (e.g. !grant, !smite, !bless).
+func (p *partyManager) notifyChange() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.broadcastLocked()
+}
+
+// expCooldownTracker gates exp-on-message per chatter. Memory-only by design
+// — losing it on a controller restart just means everyone's briefly un-gated.
+type expCooldownTracker struct {
+	mu   sync.Mutex
+	last map[int64]time.Time
+}
+
+func newExpCooldownTracker() *expCooldownTracker {
+	return &expCooldownTracker{last: make(map[int64]time.Time)}
+}
+
+// ready reports whether userID is off cooldown; if so it starts a new one.
+func (t *expCooldownTracker) ready(userID int64) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := time.Now()
+	if last, ok := t.last[userID]; ok && now.Sub(last) < expCooldownDuration {
+		return false
+	}
+	t.last[userID] = now
+	return true
+}
+
 func main() {
 	cfg := loadConfig()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -613,6 +943,11 @@ func main() {
 		log.Fatalf("failed to prepare mysql schema: %v", err)
 	}
 
+	characters := newCharacterStore(db)
+	if err := characters.init(ctx); err != nil {
+		log.Fatalf("failed to prepare character schema: %v", err)
+	}
+
 	botCommands := newBotCommandStore(db)
 	if err := botCommands.init(ctx); err != nil {
 		log.Fatalf("failed to prepare bot_commands schema: %v", err)
@@ -623,10 +958,12 @@ func main() {
 
 	hub := newOverlayHub()
 	other := newOtherManager(hub)
+	party := newPartyManager(hub)
+	expCooldown := newExpCooldownTracker()
 	go hub.run(ctx)
 	go startPongTicker(ctx, other)
 	go func() {
-		if err := consumeChat(ctx, cfg, hub, other, store, botCommands, commandPublisher); err != nil {
+		if err := consumeChat(ctx, cfg, hub, other, store, characters, party, expCooldown, botCommands, commandPublisher); err != nil {
 			log.Fatalf("rabbitmq consumer stopped: %v", err)
 		}
 	}()
@@ -670,7 +1007,7 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager, store *loginStore, botCommands *botCommandStore, commands *commandPublisher) error {
+func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher) error {
 	for {
 		conn, err := amqp.Dial(cfg.rabbitURL)
 		if err != nil {
@@ -734,7 +1071,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 					consumeLoop = false
 					break
 				}
-				handleDelivery(ctx, d, hub, other, store, botCommands, commands)
+				handleDelivery(ctx, d, hub, other, store, characters, party, expCooldown, botCommands, commands)
 			case <-reconnect:
 				consumeLoop = false
 			case <-ctx.Done():
@@ -752,7 +1089,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 	}
 }
 
-func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other *otherManager, store *loginStore, botCommands *botCommandStore, commands *commandPublisher) {
+func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher) {
 	defer d.Ack(false)
 
 	var payload eventPayload
@@ -768,9 +1105,9 @@ func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other
 
 	switch eventType {
 	case "channel.chat.message":
-		handleChatEvent(ctx, payload.Event, hub, other, botCommands, commands)
+		handleChatEvent(ctx, payload.Event, hub, other, characters, party, expCooldown, botCommands, commands)
 	case "channel.channel_points_custom_reward_redemption.add":
-		handleRedeemEvent(ctx, payload.Event, other, store, commands)
+		handleRedeemEvent(ctx, payload.Event, other, store, characters, party, commands)
 	default:
 		return
 	}
@@ -925,7 +1262,7 @@ func normalizeMarkdownInput(input string) string {
 	return normalized
 }
 
-func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub, other *otherManager, botCommands *botCommandStore, commands *commandPublisher) {
+func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub, other *otherManager, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher) {
 	if event == nil {
 		return
 	}
@@ -937,7 +1274,10 @@ func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub,
 		other.startPong(time.Minute)
 	}
 
+	grantMessageExp(ctx, event, characters, party, expCooldown)
+
 	if isAuthorizedForOther(event) {
+		handleDMCommand(ctx, event, lower, messageText, other, characters, party, commands)
 		if strings.HasPrefix(lower, "!other ") {
 			content := strings.TrimSpace(messageText[len("!other "):])
 			other.setBase(markdownToHTML(normalizeMarkdownInput(content)))
@@ -1037,7 +1377,335 @@ func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub,
 	}
 }
 
-func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherManager, store *loginStore, commands *commandPublisher) {
+// grantMessageExp awards flat per-message exp (gated by expCooldown) and
+// persists it immediately (design decision: exp writes on every grant, not
+// batched). Never blocks chat rendering — errors just get logged.
+func grantMessageExp(ctx context.Context, event map[string]any, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker) {
+	userID := firstString(event["chatter_user_id"], "")
+	userLogin := firstString(event["chatter_user_login"], event["chatter_user_name"], userID)
+	if userID == "" {
+		return
+	}
+	id, err := strconv.ParseInt(userID, 10, 64)
+	if err != nil {
+		return
+	}
+	if !expCooldown.ready(id) {
+		return
+	}
+
+	opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	c, err := characters.getOrCreate(opCtx, userID, userLogin)
+	if err != nil {
+		log.Printf("exp-on-message: failed to load character for %s: %v", userLogin, err)
+		return
+	}
+	if live := party.findInParty(c.Name); live != nil {
+		c = live
+	}
+
+	c.applyExp(int64(10 + c.Logins/10))
+
+	if err := characters.save(opCtx, c); err != nil {
+		log.Printf("exp-on-message: failed to save character for %s: %v", userLogin, err)
+		return
+	}
+	if party.findInParty(c.Name) != nil {
+		party.notifyChange()
+	}
+}
+
+func trimName(s string) string {
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s), "@"))
+}
+
+// killCharacter marks c dead, ejects it from the party (if present) with a
+// death event instead of the normal return, and persists.
+func killCharacter(ctx context.Context, c *character, party *partyManager, characters *characterStore) {
+	c.HP = 0
+	c.Alive = false
+	party.removeForDeath(c.Name)
+	broadcastJSON(party.hub, map[string]any{"type": "tavern.death", "name": c.Name})
+	opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := characters.save(opCtx, c); err != nil {
+		log.Printf("killCharacter: failed to save %s: %v", c.Name, err)
+	}
+}
+
+// handleDMCommand parses and executes the broadcaster/mod-only party
+// commands from design doc §6 (minus !extend and !season, both dropped: no
+// possession timer exists to extend, and the campaign table was cut). No-ops
+// for anything that isn't one of these prefixes — the caller still runs the
+// pre-existing !other/!fire/#a/#d chain afterward.
+func handleDMCommand(ctx context.Context, event map[string]any, lower, messageText string, other *otherManager, characters *characterStore, party *partyManager, commands *commandPublisher) {
+	broadcasterID := firstString(event["broadcaster_user_id"], "")
+	reply := func(format string, args ...any) {
+		if broadcasterID == "" {
+			return
+		}
+		opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_ = commands.publish(opCtx, "channel.command.send_chat", map[string]any{
+			"channel_id": broadcasterID,
+			"message":    fmt.Sprintf(format, args...),
+		})
+	}
+
+	// resolveForEdit returns the character to mutate: the live in-party copy
+	// if possessed (so edits land in the next party.update), otherwise a
+	// fresh load from the DB.
+	resolveForEdit := func(rawName string) (*character, error) {
+		name := trimName(rawName)
+		if live := party.findInParty(name); live != nil {
+			return live, nil
+		}
+		opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		return characters.getByName(opCtx, name)
+	}
+
+	persist := func(c *character) {
+		opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if err := characters.save(opCtx, c); err != nil {
+			log.Printf("dm command: failed to save %s: %v", c.Name, err)
+		}
+		if party.findInParty(c.Name) != nil {
+			party.notifyChange()
+		}
+	}
+
+	fields := strings.Fields(messageText)
+
+	switch {
+	case strings.HasPrefix(lower, "!grant "):
+		if len(fields) != 4 {
+			reply("usage: !grant <name> <exp|hp> <n>")
+			return
+		}
+		field := strings.ToLower(fields[2])
+		n, err := strconv.ParseInt(fields[3], 10, 64)
+		if err != nil {
+			reply("!grant: %q isn't a number", fields[3])
+			return
+		}
+		c, err := resolveForEdit(fields[1])
+		if err != nil || c == nil {
+			reply("!grant: no character named %s", fields[1])
+			return
+		}
+		switch field {
+		case "exp":
+			c.applyExp(n)
+			persist(c)
+			reply("%s: exp now %d (level %d)", c.Name, c.Exp, c.Level)
+		case "hp":
+			c.HP += int(n)
+			if c.HP > c.MaxHP {
+				c.HP = c.MaxHP
+			}
+			if c.HP <= 0 {
+				killCharacter(ctx, c, party, characters)
+				reply("💀 %s has fallen", c.Name)
+				return
+			}
+			persist(c)
+			reply("%s: hp now %d/%d", c.Name, c.HP, c.MaxHP)
+		default:
+			reply("!grant: field must be exp or hp")
+		}
+
+	case strings.HasPrefix(lower, "!smite "):
+		if len(fields) != 3 {
+			reply("usage: !smite <name> <n>")
+			return
+		}
+		n, err := strconv.Atoi(fields[2])
+		if err != nil {
+			reply("!smite: %q isn't a number", fields[2])
+			return
+		}
+		c, err := resolveForEdit(fields[1])
+		if err != nil || c == nil {
+			reply("!smite: no character named %s", fields[1])
+			return
+		}
+		c.HP -= n
+		if c.HP <= 0 {
+			killCharacter(ctx, c, party, characters)
+			reply("💀 %s has fallen", c.Name)
+			return
+		}
+		persist(c)
+		reply("%s takes %d damage (%d/%d hp)", c.Name, n, c.HP, c.MaxHP)
+
+	case strings.HasPrefix(lower, "!bless "):
+		if len(fields) != 3 {
+			reply("usage: !bless <name> <n>")
+			return
+		}
+		n, err := strconv.Atoi(fields[2])
+		if err != nil || n < 0 {
+			reply("!bless: %q isn't a positive number", fields[2])
+			return
+		}
+		c, err := resolveForEdit(fields[1])
+		if err != nil || c == nil {
+			reply("!bless: no character named %s", fields[1])
+			return
+		}
+		c.HP += n
+		if c.HP > c.MaxHP {
+			c.HP = c.MaxHP
+		}
+		persist(c)
+		reply("%s healed to %d/%d hp", c.Name, c.HP, c.MaxHP)
+
+	case strings.HasPrefix(lower, "!revive "):
+		if len(fields) != 2 && len(fields) != 3 {
+			reply("usage: !revive <name> [levels]")
+			return
+		}
+		cost := 1
+		if len(fields) == 3 {
+			n, err := strconv.Atoi(fields[2])
+			if err != nil || n < 0 {
+				reply("!revive: %q isn't a non-negative number", fields[2])
+				return
+			}
+			cost = n
+		}
+		c, err := resolveForEdit(fields[1])
+		if err != nil || c == nil {
+			reply("!revive: no character named %s", fields[1])
+			return
+		}
+		if c.Alive {
+			reply("%s isn't dead", c.Name)
+			return
+		}
+		// Revival is what costs (design doc §3): dock levels via exp deduction,
+		// then bring them back at full HP for the new (lower) level.
+		newLevel := c.Level - cost
+		if newLevel < 1 {
+			newLevel = 1
+		}
+		c.Exp = totalExpForLevel(newLevel)
+		c.Level = newLevel
+		c.MaxHP = 10 + newLevel*4
+		c.HP = c.MaxHP
+		c.Alive = true
+		persist(c)
+		reply("✨ %s rises again at level %d (%d/%d hp)", c.Name, c.Level, c.HP, c.MaxHP)
+
+	case strings.HasPrefix(lower, "!give "):
+		if len(fields) != 3 {
+			reply("usage: !give <name> <amount|cosmetic>")
+			return
+		}
+		c, err := resolveForEdit(fields[1])
+		if err != nil || c == nil {
+			reply("!give: no character named %s", fields[1])
+			return
+		}
+		if n, err := strconv.ParseInt(fields[2], 10, 64); err == nil {
+			c.Money += n
+			persist(c)
+			reply("%s: money now %d", c.Name, c.Money)
+		} else {
+			c.Cosmetics = append(c.Cosmetics, fields[2])
+			persist(c)
+			reply("%s: granted cosmetic %q", c.Name, fields[2])
+		}
+
+	case lower == "!newparty":
+		ejected := party.newParty()
+		for _, c := range ejected {
+			opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			_ = characters.save(opCtx, c)
+			cancel()
+		}
+		reply("party cleared — all 4 slots open")
+
+	case strings.HasPrefix(lower, "!kick "):
+		if len(fields) != 2 {
+			reply("usage: !kick <name>")
+			return
+		}
+		name := trimName(fields[1])
+		c := party.kick(name)
+		if c == nil {
+			reply("!kick: %s isn't in the party", name)
+			return
+		}
+		opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_ = characters.save(opCtx, c)
+		cancel()
+		reply("%s returns to the tavern", c.Name)
+
+	case strings.HasPrefix(lower, "!sheet "):
+		if len(fields) != 2 {
+			reply("usage: !sheet <name>")
+			return
+		}
+		c, err := resolveForEdit(fields[1])
+		if err != nil || c == nil {
+			reply("!sheet: no character named %s", fields[1])
+			return
+		}
+		sheetHTML := fmt.Sprintf(
+			"<h2>%s</h2><p>Level %d — %d/%d HP — %d exp — %d gold</p>",
+			html.EscapeString(c.Name), c.Level, c.HP, c.MaxHP, c.Exp, c.Money,
+		)
+		other.startAnnouncement(sheetHTML, 30*time.Second)
+	}
+}
+
+// handlePossessionRedeem processes a "join the party" channel-points
+// redemption: load-or-create the character, refuse if dead or the party is
+// full (manually refunded by the streamer — no auto-refund plumbing exists
+// yet), otherwise seat them with no expiry.
+func handlePossessionRedeem(ctx context.Context, event map[string]any, characters *characterStore, party *partyManager, commands *commandPublisher) {
+	userID := firstString(event["user_id"], "")
+	userLogin := firstString(event["user_login"], event["user_name"], userID)
+	if userID == "" {
+		log.Print("join the party redemption missing user_id")
+		return
+	}
+	broadcasterID := firstString(event["broadcaster_user_id"], "")
+
+	opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	c, err := characters.getOrCreate(opCtx, userID, userLogin)
+	if err != nil {
+		log.Printf("join the party: failed to load character for %s: %v", userLogin, err)
+		return
+	}
+
+	reason := party.join(c)
+
+	if broadcasterID == "" {
+		return
+	}
+	var message string
+	if reason == "" {
+		message = fmt.Sprintf("@%s's character joins the party!", userLogin)
+	} else {
+		message = fmt.Sprintf("@%s can't join — %s", userLogin, reason)
+	}
+	if err := commands.publish(opCtx, "channel.command.send_chat", map[string]any{
+		"channel_id": broadcasterID,
+		"message":    message,
+	}); err != nil {
+		log.Printf("failed to publish join-the-party chat command: %v", err)
+	}
+}
+
+func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, commands *commandPublisher) {
 	if event == nil {
 		return
 	}
@@ -1049,6 +1717,8 @@ func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherMa
 	case strings.EqualFold(title, "announcement"):
 		userInput := firstString(event["user_input"], "")
 		other.startAnnouncement(markdownToHTML(normalizeMarkdownInput(userInput)), 5*time.Minute)
+	case strings.EqualFold(title, joinPartyRewardTitle):
+		handlePossessionRedeem(ctx, event, characters, party, commands)
 	case strings.EqualFold(title, dailyLoginRewardTitle),
 		strings.EqualFold(title, "general_test"):
 		userID := firstString(event["user_id"], "")
