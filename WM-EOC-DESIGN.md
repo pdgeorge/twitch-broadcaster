@@ -119,7 +119,7 @@ Gated with the existing `isAuthorizedForOther` badge/broadcaster check, in `hand
 !newparty                     eject the whole party, reopen all 4 slots
 !sheet <name>                 broadcast a character's sheet to the billboard (30s)
 !roll <name>                  Rolls a d20 on screen for <name> with name under it, adds their level to the result.
-!revive <name>                resurrect a dead character: costs them X levels (default 1, as exp deduction), HP to new max, alive=1
+!revive <name> [levels]       resurrect a dead character: costs them [levels] levels (default 1, as exp deduction), HP to new max, alive=1
 !fire                         (existing) cancel active announcement
 !other <markdown>             (existing) unchanged, still the base billboard content
 ```
@@ -165,7 +165,7 @@ Possessed characters' messages get TTS with a voice tier tied to logins. `tiktok
 - **M1 (schema + possession + plain party cards)** — **implemented, untested.**
   `characterStore` schema migration, `partyManager` (max 4, join/kick/newparty, no timer), "join the party" redemption, exp-on-message with 45s cooldown, finalized triangular level curve (§3), `!grant`/`!give`/`!smite`/`!bless`/`!kick`/`!newparty`/`!sheet`, `party.update` broadcast, party card rendering in the overlay.
 - **M2 (tavern scene)**
-  real tavern backdrop art + geometry, ambient roster of present-but-not-possessed chatters (new state, distinct from `partyManager`), enter/chat/sleep/wander/possess/return animations consuming the already-sent `tavern.*` events, level-up spin, dude size scaling with level (§7), `!roll` on-screen d20 (§7a — needs a new websocket message type plus overlay rendering), `!revive` backend command (§3 — needed as soon as anyone actually dies, so it can't wait for the graveyard art in M4), stream.online HP regen (§7), TTS voices (§9)
+  real tavern backdrop art + geometry, ambient roster of present-but-not-possessed chatters (new state, distinct from `partyManager`), enter/chat/sleep/wander/possess/return animations consuming the already-sent `tavern.*` events, level-up spin, dude size scaling with level (§7), `!roll` on-screen d20 (§7a — needs a new websocket message type plus overlay rendering), stream.online HP regen (§7), TTS voices (§9). `!revive` was pulled forward and implemented same-day as the first playtest death (2026-07-11, BobChao87, smote for 69)
 - **M3 (billboard + pong removal)**
   billboard styling for `other.update`, delete pong code paths.
 - **M4 (open)**
