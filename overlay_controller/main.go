@@ -9,6 +9,7 @@ import (
 	"hash/fnv"
 	"html"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -85,7 +86,6 @@ const dailyLoginRewardTitle = "daily login bonus"
 const joinPartyRewardTitle = "join the party"
 const partyMaxSize = 4
 const expCooldownDuration = 45 * time.Second
-const expLevelDivisor = 100 // level = 1 + exp/expLevelDivisor; placeholder curve, tune freely
 
 func newOverlayHub() *overlayHub {
 	return &overlayHub{
@@ -276,8 +276,31 @@ type character struct {
 	Cosmetics []string
 }
 
+// totalExpForLevel is the cumulative exp required to *reach* level, using a
+// triangular curve anchored at level 2 = 10 exp: total(L) = 5*L*(L-1). Cost
+// per level grows linearly (10, 20, 30, ...), so total exp grows quadratically
+// — quick early levels, a real grind for veterans, never literally unreachable
+// the way a compounding-exponential curve would be. See DESIGN.md §3.
+func totalExpForLevel(level int) int64 {
+	l := int64(level)
+	return 5 * l * (l - 1)
+}
+
+// levelForExp inverts totalExpForLevel by solving 5*L^2 - 5*L - exp = 0 for L.
+func levelForExp(exp int64) int {
+	if exp < 0 {
+		exp = 0
+	}
+	l := (5.0 + math.Sqrt(25.0+20.0*float64(exp))) / 10.0
+	level := int(math.Floor(l + 1e-9)) // epsilon guards float error landing just under an exact threshold
+	if level < 1 {
+		level = 1
+	}
+	return level
+}
+
 func (c *character) expNext() int64 {
-	return int64(c.Level) * expLevelDivisor
+	return totalExpForLevel(c.Level + 1)
 }
 
 // applyExp recomputes level/max_hp/hp after an exp change. Level-up restores
@@ -287,10 +310,7 @@ func (c *character) applyExp(delta int64) {
 	if c.Exp < 0 {
 		c.Exp = 0
 	}
-	newLevel := 1 + int(c.Exp/expLevelDivisor)
-	if newLevel < 1 {
-		newLevel = 1
-	}
+	newLevel := levelForExp(c.Exp)
 	leveledUp := newLevel > c.Level
 	c.Level = newLevel
 	c.MaxHP = 10 + c.Level*4

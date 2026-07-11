@@ -1,7 +1,9 @@
 # Tavern & West Marches Overlay — Design Document
 
-Status: v2 (2026-07-09), supersedes v1 draft. M1 implemented, untested by the
-streamer yet. This doc is the spec for extending `twitch-broadcaster`
+Status: v3 (2026-07-09), supersedes v2. M1 implemented, untested by the
+streamer yet; v3 finalizes the exp/level curve (was a placeholder in v2) and
+adds two forward-looking specs for M2/stretch: level-scaled tavern dude size,
+and the `1d20+level` encounter check. This doc is the spec for extending `twitch-broadcaster`
 (receiver → RabbitMQ fanout → overlay_controller) with a persistent West
 Marches-style campaign driven by chat, plus a "tavern" ambient HUD. It
 assumes the existing architecture: `main.py` (twitch_receiver) publishes
@@ -75,10 +77,41 @@ the existing "daily login bonus" redemption increments.
 There is deliberately NO taming curve: high-login veterans are allowed to be
 "gods among men."
 
-Level curve (v2, was unspecified in v1): `level = 1 + exp/100` (integer
-division) — a placeholder, easy to retune, no design intent behind the
-specific number yet. `max_hp = 10 + level*4`; level-up restores HP to the new
-max.
+**Level curve (v3, finalized)**: a triangular curve anchored at "level 2 costs
+10 exp." Cost to go from level *L* to *L+1* grows linearly (10, 20, 30, ...),
+so cumulative exp grows quadratically:
+
+```
+total_exp(level) = 5 * level * (level - 1)
+```
+
+| level | total exp | exp for *this* level |
+|------:|----------:|----------------------:|
+| 1     | 0         | —                      |
+| 2     | 10        | 10                     |
+| 3     | 30        | 20                     |
+| 5     | 100       | 40                     |
+| 10    | 450       | 90                     |
+| 20    | 1900      | 190                    |
+| 30    | 4350      | 290                    |
+
+Rejected alternatives: a log curve would make each level *cheaper* than the
+last, which runs backwards from "leveling should feel earned"; a compounding
+exponential curve (e.g. `1.5^level`) explodes so fast that levels past ~15-20
+become practically unreachable, undercutting the "gods among men" idea by
+making it unattainable rather than rare. Triangular sits in between — fast,
+rewarding early levels, a real grind later, no hard wall.
+
+Implemented as `totalExpForLevel`/`levelForExp` in `overlay_controller/main.go`
+(inverts the formula via the quadratic equation, `int(math.Floor(...))`).
+`max_hp = 10 + level*4`; level-up restores HP to the new max.
+
+**Known pacing caveat**: at `10 + logins/10` exp/message on a 45s cooldown, a
+very active chatter can reach level ~20+ within a single long stream purely
+from message volume, largely independent of their login history. If level
+should track veteran status specifically rather than single-session grinding,
+that's a knob to revisit (e.g. weight exp gain more heavily by `logins`, or
+cap session exp) — not solved here, flagged for playtesting.
 
 Login-count unlock thresholds (10/30/60 logins → ability slot / resurrection
 token / prestige class+TTS) are **not implemented yet** — deferred past M1,
@@ -200,17 +233,50 @@ into 9 variants via CSS `hue-rotate`, selected by `hash(username) % 9`.
 Stretch: per-chatter cosmetics from the `cosmetics` JSON column — the hash
 stays the fallback for chatters without cosmetics.
 
+**Ambient dude size scales with level (v3, spec for M2, not implemented)**:
+in the tavern scene proper (the ambient population of chatters who are
+*wandering*, not possessed — a feature that doesn't exist client-side yet),
+each dude's rendered size scales with their character's level. The point is
+to make level legible outside the party too, so someone who'd rather vibe in
+chat than redeem "join the party" still gets to visibly be a big deal in the
+tavern crowd — level isn't only a party-combat stat. Proposed formula, tune
+on sight once there's an actual tavern to look at:
+
+```
+scale = min(1 + (level - 1) * 0.08, 2.5)   // 64px base -> ~160px cap around level ~19+
+```
+
+Capped so a max-level veteran reads as "notably huge," not "bigger than the
+building." This requires the tavern's ambient roster (who's present, their
+level) which is separate state from `partyManager` — the possessed party is
+a subset of, not the same as, everyone who's chatted recently. Out of scope
+until the tavern scene itself is built; party cards (M1) stay a fixed size
+regardless of level, since they're a UI card, not the ambient dude.
+
+## 7a. Encounter resolution (DM ruling, v3)
+
+Simple check mechanic for the DM to adjudicate possessed-party encounters:
+**`1d20 + level` vs. a challenge number**, success/fail, no other modifiers.
+This is a manual DM ruling for now — roll and decide narratively, same as
+any `!smite`/`!bless` adjustment. A `!check <name> <dc>` command that rolls
+the d20 and replies success/fail would be a small, self-contained addition
+whenever it's wanted (rand + compare + chat reply, no new state) — listed as
+a stretch candidate in §10, not built yet since it wasn't asked for.
+
 ## 8. Explicit non-goals / decisions log
 
 No log-curve exp multiplier (veterans are allowed to dominate — community
-lore). No server-side animation — browser owns all tavern idle life once M2
-exists. No possession timer (v2 change from v1 — party only changes via
+lore). Level curve is triangular, not exponential — chosen deliberately over
+a compounding curve so high levels stay hard, not impossible (v3, §3). No
+server-side animation — browser owns all tavern idle life once M2 exists. No
+possession timer (v2 change from v1 — party only changes via
 `!kick`/`!newparty`). No campaign/season table or `!season` command (v2
 change from v1 — cut entirely, not deferred; may come back as its own design
 pass later). No automated redemption refunds (manual by design — "forces me
 to address it"). No pong (unrelated cleanup, still pending, tracked
-separately from this milestone). Memory of this design lives in this file,
-not in chat.
+separately from this milestone). No automated encounter checks yet — `1d20 +
+level` vs. challenge is a DM manual ruling until/unless `!check` gets built
+(v3, §7a). Memory of this design lives in this file, not in chat.
 
 ## 9. TTS (post-MVP, unchanged from v1)
 
@@ -226,14 +292,17 @@ on the streaming PC — keeps the Pi build clean.
 - **M1 (schema + possession + plain party cards)** — **implemented, untested.**
   `characterStore` schema migration, `partyManager` (max 4, join/kick/newparty,
   no timer), "join the party" redemption, exp-on-message with 45s cooldown,
-  `!grant`/`!give`/`!smite`/`!bless`/`!kick`/`!newparty`/`!sheet`, `party.update`
-  broadcast, party card rendering in the overlay.
-- **M2 (tavern scene)**: real tavern backdrop art + geometry, enter/chat/sleep/
-  wander/possess/return animations consuming the already-sent `tavern.*`
-  events, level-up spin.
+  finalized triangular level curve (§3), `!grant`/`!give`/`!smite`/`!bless`/
+  `!kick`/`!newparty`/`!sheet`, `party.update` broadcast, party card rendering
+  in the overlay.
+- **M2 (tavern scene)**: real tavern backdrop art + geometry, ambient roster of
+  present-but-not-possessed chatters (new state, distinct from `partyManager`),
+  enter/chat/sleep/wander/possess/return animations consuming the already-sent
+  `tavern.*` events, level-up spin, dude size scaling with level (§7).
 - **M3 (billboard + pong removal)**: billboard styling for `other.update`,
   delete pong code paths.
 - **M4 (open)**: unlock thresholds (10/30/60 logins), death/graveyard visual,
   whatever replaces the campaign/season concept if it comes back.
 - **Stretch**: TTS voices, cosmetics shop + validation table, catch-up exp,
-  courier animation, prestige classes.
+  courier animation, prestige classes, `!check <name> <dc>` encounter command
+  (§7a).
