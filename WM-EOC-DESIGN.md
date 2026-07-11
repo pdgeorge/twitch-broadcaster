@@ -136,13 +136,15 @@ Gated with the existing `isAuthorizedForOther` badge/broadcaster check, in `hand
 
 Avatars MVP: implemented as a single SVG (`overlay/assets/dude.svg`), tinted into 9 variants via CSS `hue-rotate`, selected by `hash(username) % 9`. Stretch: per-chatter cosmetics from the `cosmetics` JSON column — the hash stays the fallback for chatters without cosmetics. (Same goal as EchoesOfChat's "we can't have each chatter just being a little fkn... same blob" — cosmetics are the differentiator, the hash tint is the floor.)
 
-**Ambient dude size scales with level (not implemented)**: in the tavern scene proper (the ambient population of chatters who are *wandering*, not possessed — a feature that doesn't exist client-side yet), each dude's rendered size scales with their character's level. The point is to make level legible outside the party too, so someone who'd rather vibe in chat than redeem "join the party" still gets to visibly be a big deal in the tavern crowd — level isn't only a party-combat stat. Proposed formula, tune on sight once there's an actual tavern to look at:
+**Ambient loitering (MVP implemented 2026-07-12)**: any chat message counts as being present in the tavern. The backend `tavernManager` tracks the roster (30-minute idle timeout, possessed and dead chatters excluded — possession pulls a dude off the floor, `!kick` puts them back on their next message) and broadcasts `tavern.roster`; it also rebroadcasts once a minute so a refreshed browser source self-heals. The overlay renders each dude as a level-scaled, hue-tinted Dabling with their name underneath, wandering the walking strip: **bottom of screen, 25% → 100% of the width, 260px tall** — placeholder geometry in one CSS block (`#tavern-area`), to be adjusted when the real background art fixes the tavern bounds. Dudes amble to random spots every 3–12s, face their walking direction, and idle-bob. Still missing from the full scene: chat speech-bubbles, sleep-after-silence, the walk-to-door possess/return animation, level-up spin.
+
+**Dude size scales with level (implemented with the above)**: each dude's rendered size scales with their character's level. The point is to make level legible outside the party too, so someone who'd rather vibe in chat than redeem "join the party" still gets to visibly be a big deal in the tavern crowd — level isn't only a party-combat stat. Proposed formula, tune on sight once there's an actual tavern to look at:
 
 ```
-scale = min(1 + (level - 1) * 0.08, 2.5)   // 64px base -> ~160px cap around level ~19+
+scale = min(1 + (level - 1) * 0.08, 2.5)   // 96px base -> 240px cap around level ~19+
 ```
 
-Capped so a max-level veteran reads as "notably huge," not "bigger than the building." This requires the tavern's ambient roster (who's present, their level) which is separate state from `partyManager` — the possessed party is a subset of, not the same as, everyone who's chatted recently. Out of scope until the tavern scene itself is built; party cards (M1) stay a fixed size regardless of level, since they're a UI card, not the ambient dude.
+Capped so a max-level veteran reads as "notably huge," not "bigger than the building." Party cards (M1) stay a fixed size regardless of level, since they're a UI card, not the ambient dude.
 
 ## 7a. Encounter resolution (DM ruling, v3)
 
@@ -171,7 +173,7 @@ Voice selection: the voice pool grows with logins — everyone gets the 10 plain
 - **M1 (schema + possession + plain party cards)** — **implemented, untested.**
   `characterStore` schema migration, `partyManager` (max 4, join/kick/newparty, no timer), "join the party" redemption, exp-on-message with 45s cooldown, finalized triangular level curve (§3), `!grant`/`!give`/`!smite`/`!bless`/`!kick`/`!newparty`/`!sheet`, `party.update` broadcast, party card rendering in the overlay.
 - **M2 (tavern scene)**
-  real tavern backdrop art + geometry, ambient roster of present-but-not-possessed chatters (new state, distinct from `partyManager`), enter/chat/sleep/wander/possess/return animations consuming the already-sent `tavern.*` events, level-up spin, dude size scaling with level (§7), stream.online HP regen (§7). Pulled forward and already done: `!revive` (2026-07-11, first playtest showed dead characters had no way back), TTS (§9, 2026-07-11), `!roll` with nat-1/nat-20 effects (§7a, 2026-07-12)
+  remaining: real tavern backdrop art + geometry (walking strip is a placeholder, §7), chat speech-bubbles, sleep-after-silence, walk-to-door possess/return animations, level-up spin, stream.online HP regen (§7). Already done: `!revive` (2026-07-11, first playtest showed dead characters had no way back), TTS (§9, 2026-07-11), `!roll` with nat-1/nat-20 effects (§7a, 2026-07-12), ambient loitering roster with level-scaled wandering dudes (§7, 2026-07-12)
 - **M3 (billboard + pong removal)**
   billboard styling for `other.update`, delete pong code paths.
 - **M4 (open)**

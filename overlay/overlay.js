@@ -27,6 +27,69 @@
     });
   }
 
+  const tavernArea = document.getElementById('tavern-area');
+  const tavernDudes = new Map(); // lowercase name -> {el, x, wanderTimer}
+  let partyNames = new Set();
+  const DUDE_BASE_HEIGHT = 96;
+
+  function dudeScale(level) {
+    return Math.min(1 + ((level || 1) - 1) * 0.08, 2.5);
+  }
+
+  function wanderTo(dude) {
+    const x = 2 + Math.random() * 88; // % across the walking strip
+    const distance = Math.abs(x - (dude.x ?? x));
+    dude.el.style.transition = `left ${(2 + distance * 0.12).toFixed(1)}s linear`;
+    dude.el.style.left = `${x}%`;
+    const sprite = dude.el.querySelector('.dude-sprite');
+    if (x < dude.x) sprite.style.transform = 'scaleX(-1)';
+    else if (x > dude.x) sprite.style.transform = 'scaleX(1)';
+    dude.x = x;
+  }
+
+  function scheduleWander(dude) {
+    dude.wanderTimer = setTimeout(() => {
+      wanderTo(dude);
+      scheduleWander(dude);
+    }, 3000 + Math.random() * 9000);
+  }
+
+  function removeDude(key) {
+    const dude = tavernDudes.get(key);
+    if (!dude) return;
+    clearTimeout(dude.wanderTimer);
+    dude.el.remove();
+    tavernDudes.delete(key);
+  }
+
+  function renderTavern(dudes) {
+    const seen = new Set();
+    (dudes || []).forEach((d) => {
+      const key = (d.name || '').toLowerCase();
+      if (!key || partyNames.has(key)) return; // possessed dudes are on cards, not the floor
+      seen.add(key);
+      let dude = tavernDudes.get(key);
+      if (!dude) {
+        const el = document.createElement('div');
+        el.className = 'tavern-dude';
+        el.innerHTML = `
+          <div class="dude-sprite"><img src="assets/Dabling.png" style="filter: hue-rotate(${(d.variant || 0) * 40}deg)" alt="" /></div>
+          <div class="dude-name">${escapeHTML(d.name || '')}</div>
+        `;
+        el.style.bottom = `${Math.floor(Math.random() * 14)}px`;
+        tavernArea.appendChild(el);
+        dude = { el, x: 2 + Math.random() * 88 };
+        el.style.left = `${dude.x}%`;
+        tavernDudes.set(key, dude);
+        scheduleWander(dude);
+      }
+      dude.el.style.setProperty('--dude-height', `${Math.round(DUDE_BASE_HEIGHT * dudeScale(d.level))}px`);
+    });
+    for (const key of [...tavernDudes.keys()]) {
+      if (!seen.has(key)) removeDude(key);
+    }
+  }
+
   const rollBox = document.getElementById('roll-box');
   let rollHideTimer = null;
   let rollCycleTimer = null;
@@ -367,6 +430,14 @@
 
         if (payload.type === 'party.update') {
           renderPartyCards(payload.members);
+          partyNames = new Set((payload.members || []).map((m) => (m.name || '').toLowerCase()));
+          for (const key of [...tavernDudes.keys()]) {
+            if (partyNames.has(key)) removeDude(key);
+          }
+        }
+
+        if (payload.type === 'tavern.roster') {
+          renderTavern(payload.dudes);
         }
 
         if (payload.type === 'tts.play') {

@@ -1033,6 +1033,116 @@ func (p *partyManager) notifyChange() {
 
 // expCooldownTracker gates exp-on-message per chatter. Memory-only by design
 // — losing it on a controller restart just means everyone's briefly un-gated.
+// tavernManager tracks the ambient tavern roster (design doc §7): chatters
+// who've spoken recently and aren't possessed or dead. Presence expires after
+// tavernIdleTimeout; the roster is rebroadcast on every visible change and
+// once per sweep tick so a refreshed browser source self-heals within a minute.
+type tavernManager struct {
+	hub   *overlayHub
+	mu    sync.Mutex
+	dudes map[string]*tavernDude
+}
+
+type tavernDude struct {
+	Name     string
+	Level    int
+	LastSeen time.Time
+}
+
+const tavernIdleTimeout = 30 * time.Minute
+
+func newTavernManager(hub *overlayHub) *tavernManager {
+	return &tavernManager{hub: hub, dudes: map[string]*tavernDude{}}
+}
+
+func (t *tavernManager) broadcastLocked() {
+	type dudePayload struct {
+		Name    string `json:"name"`
+		Level   int    `json:"level"`
+		Variant int    `json:"variant"`
+	}
+	dudes := make([]dudePayload, 0, len(t.dudes))
+	for _, d := range t.dudes {
+		dudes = append(dudes, dudePayload{Name: d.Name, Level: d.Level, Variant: spriteVariant(d.Name)})
+	}
+	broadcastJSON(t.hub, map[string]any{"type": "tavern.roster", "dudes": dudes})
+}
+
+// touch refreshes presence, broadcasting only when the roster visibly
+// changes (new dude, or a level change that resizes them).
+func (t *tavernManager) touch(c *character) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	key := strings.ToLower(c.Name)
+	if d, ok := t.dudes[key]; ok {
+		d.LastSeen = time.Now()
+		if d.Level == c.Level {
+			return
+		}
+		d.Level = c.Level
+	} else {
+		t.dudes[key] = &tavernDude{Name: c.Name, Level: c.Level, LastSeen: time.Now()}
+	}
+	t.broadcastLocked()
+}
+
+func (t *tavernManager) remove(name string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	key := strings.ToLower(name)
+	if _, ok := t.dudes[key]; !ok {
+		return
+	}
+	delete(t.dudes, key)
+	t.broadcastLocked()
+}
+
+func (t *tavernManager) run(ctx context.Context) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			t.mu.Lock()
+			cutoff := time.Now().Add(-tavernIdleTimeout)
+			for key, d := range t.dudes {
+				if d.LastSeen.Before(cutoff) {
+					delete(t.dudes, key)
+				}
+			}
+			t.broadcastLocked()
+			t.mu.Unlock()
+		}
+	}
+}
+
+// trackTavernPresence counts any chat message as being in the tavern, unless
+// the chatter is possessed (they're on a party card, not the floor) or dead
+// (the graveyard visual is M4 — until then the dead just don't appear).
+func trackTavernPresence(ctx context.Context, event map[string]any, characters *characterStore, party *partyManager, tavern *tavernManager) {
+	userID := firstString(event["chatter_user_id"], "")
+	userLogin := firstString(event["chatter_user_login"], event["chatter_user_name"], "")
+	if userID == "" || userLogin == "" {
+		return
+	}
+	if party.findInParty(userLogin) != nil {
+		return
+	}
+	opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	c, err := characters.getOrCreate(opCtx, userID, userLogin)
+	if err != nil {
+		log.Printf("tavern: failed to load character for %s: %v", userLogin, err)
+		return
+	}
+	if !c.Alive {
+		return
+	}
+	tavern.touch(c)
+}
+
 type expCooldownTracker struct {
 	mu   sync.Mutex
 	last map[int64]time.Time
@@ -1091,10 +1201,12 @@ func main() {
 	party := newPartyManager(hub)
 	expCooldown := newExpCooldownTracker()
 	tts := newTTSManager(cfg.ttsServiceURL, hub)
+	tavern := newTavernManager(hub)
 	go hub.run(ctx)
 	go startPongTicker(ctx, other)
+	go tavern.run(ctx)
 	go func() {
-		if err := consumeChat(ctx, cfg, hub, other, store, characters, party, expCooldown, botCommands, commandPublisher, tts); err != nil {
+		if err := consumeChat(ctx, cfg, hub, other, store, characters, party, expCooldown, botCommands, commandPublisher, tts, tavern); err != nil {
 			log.Fatalf("rabbitmq consumer stopped: %v", err)
 		}
 	}()
@@ -1140,7 +1252,7 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher, tts *ttsManager) error {
+func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager) error {
 	for {
 		conn, err := amqp.Dial(cfg.rabbitURL)
 		if err != nil {
@@ -1204,7 +1316,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 					consumeLoop = false
 					break
 				}
-				handleDelivery(ctx, d, hub, other, store, characters, party, expCooldown, botCommands, commands, tts)
+				handleDelivery(ctx, d, hub, other, store, characters, party, expCooldown, botCommands, commands, tts, tavern)
 			case <-reconnect:
 				consumeLoop = false
 			case <-ctx.Done():
@@ -1222,7 +1334,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 	}
 }
 
-func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher, tts *ttsManager) {
+func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager) {
 	defer d.Ack(false)
 
 	var payload eventPayload
@@ -1238,9 +1350,9 @@ func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other
 
 	switch eventType {
 	case "channel.chat.message":
-		handleChatEvent(ctx, payload.Event, hub, other, characters, party, expCooldown, botCommands, commands, tts)
+		handleChatEvent(ctx, payload.Event, hub, other, characters, party, expCooldown, botCommands, commands, tts, tavern)
 	case "channel.channel_points_custom_reward_redemption.add":
-		handleRedeemEvent(ctx, payload.Event, other, store, characters, party, commands)
+		handleRedeemEvent(ctx, payload.Event, other, store, characters, party, commands, tavern)
 	default:
 		return
 	}
@@ -1395,7 +1507,7 @@ func normalizeMarkdownInput(input string) string {
 	return normalized
 }
 
-func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub, other *otherManager, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher, tts *ttsManager) {
+func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub, other *otherManager, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager) {
 	if event == nil {
 		return
 	}
@@ -1408,10 +1520,11 @@ func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub,
 	}
 
 	grantMessageExp(ctx, event, characters, party, expCooldown)
+	trackTavernPresence(ctx, event, characters, party, tavern)
 	speakPartyMessage(event, messageText, party, tts)
 
 	if isAuthorizedForOther(event) {
-		handleDMCommand(ctx, event, lower, messageText, other, characters, party, commands)
+		handleDMCommand(ctx, event, lower, messageText, other, characters, party, commands, tavern)
 		if strings.HasPrefix(lower, "!other ") {
 			content := strings.TrimSpace(messageText[len("!other "):])
 			other.setBase(markdownToHTML(normalizeMarkdownInput(content)))
@@ -1556,11 +1669,13 @@ func trimName(s string) string {
 }
 
 // killCharacter marks c dead, ejects it from the party (if present) with a
-// death event instead of the normal return, and persists.
-func killCharacter(ctx context.Context, c *character, party *partyManager, characters *characterStore) {
+// death event instead of the normal return, clears any tavern presence, and
+// persists.
+func killCharacter(ctx context.Context, c *character, party *partyManager, characters *characterStore, tavern *tavernManager) {
 	c.HP = 0
 	c.Alive = false
 	party.removeForDeath(c.Name)
+	tavern.remove(c.Name)
 	broadcastJSON(party.hub, map[string]any{"type": "tavern.death", "name": c.Name})
 	opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -1574,7 +1689,7 @@ func killCharacter(ctx context.Context, c *character, party *partyManager, chara
 // possession timer exists to extend, and the campaign table was cut). No-ops
 // for anything that isn't one of these prefixes — the caller still runs the
 // pre-existing !other/!fire/#a/#d chain afterward.
-func handleDMCommand(ctx context.Context, event map[string]any, lower, messageText string, other *otherManager, characters *characterStore, party *partyManager, commands *commandPublisher) {
+func handleDMCommand(ctx context.Context, event map[string]any, lower, messageText string, other *otherManager, characters *characterStore, party *partyManager, commands *commandPublisher, tavern *tavernManager) {
 	broadcasterID := firstString(event["broadcaster_user_id"], "")
 	reply := func(format string, args ...any) {
 		if broadcasterID == "" {
@@ -1642,7 +1757,7 @@ func handleDMCommand(ctx context.Context, event map[string]any, lower, messageTe
 				c.HP = c.MaxHP
 			}
 			if c.HP <= 0 {
-				killCharacter(ctx, c, party, characters)
+				killCharacter(ctx, c, party, characters, tavern)
 				reply("💀 %s has fallen", c.Name)
 				return
 			}
@@ -1669,7 +1784,7 @@ func handleDMCommand(ctx context.Context, event map[string]any, lower, messageTe
 		}
 		c.HP -= n
 		if c.HP <= 0 {
-			killCharacter(ctx, c, party, characters)
+			killCharacter(ctx, c, party, characters, tavern)
 			reply("💀 %s has fallen", c.Name)
 			return
 		}
@@ -1838,7 +1953,7 @@ func handleDMCommand(ctx context.Context, event map[string]any, lower, messageTe
 // redemption: load-or-create the character, refuse if dead or the party is
 // full (manually refunded by the streamer — no auto-refund plumbing exists
 // yet), otherwise seat them with no expiry.
-func handlePossessionRedeem(ctx context.Context, event map[string]any, characters *characterStore, party *partyManager, commands *commandPublisher) {
+func handlePossessionRedeem(ctx context.Context, event map[string]any, characters *characterStore, party *partyManager, commands *commandPublisher, tavern *tavernManager) {
 	userID := firstString(event["user_id"], "")
 	userLogin := firstString(event["user_login"], event["user_name"], userID)
 	if userID == "" {
@@ -1857,6 +1972,9 @@ func handlePossessionRedeem(ctx context.Context, event map[string]any, character
 	}
 
 	reason := party.join(c)
+	if reason == "" {
+		tavern.remove(c.Name)
+	}
 
 	if broadcasterID == "" {
 		return
@@ -1875,7 +1993,7 @@ func handlePossessionRedeem(ctx context.Context, event map[string]any, character
 	}
 }
 
-func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, commands *commandPublisher) {
+func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, commands *commandPublisher, tavern *tavernManager) {
 	if event == nil {
 		return
 	}
@@ -1888,7 +2006,7 @@ func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherMa
 		userInput := firstString(event["user_input"], "")
 		other.startAnnouncement(markdownToHTML(normalizeMarkdownInput(userInput)), 5*time.Minute)
 	case strings.EqualFold(title, joinPartyRewardTitle):
-		handlePossessionRedeem(ctx, event, characters, party, commands)
+		handlePossessionRedeem(ctx, event, characters, party, commands, tavern)
 	case strings.EqualFold(title, dailyLoginRewardTitle),
 		strings.EqualFold(title, "general_test"):
 		userID := firstString(event["user_id"], "")
