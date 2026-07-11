@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"hash/fnv"
 	"html"
+	"io"
 	"log"
 	"math"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -34,6 +36,7 @@ type config struct {
 	httpPort       string
 	staticDir      string
 	mysqlDSN       string
+	ttsServiceURL  string
 }
 
 type chatFragment struct {
@@ -328,6 +331,133 @@ func spriteVariant(name string) int {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(strings.ToLower(name)))
 	return int(h.Sum32() % 9)
+}
+
+// ttsVoiceTiers gate the voice pool by login count (design doc §9): everyone
+// gets the plain voices, 10+ logins add the narrator set, 30+ add the
+// character voices. Names must exist in tts_service's TIKTOK_VOICES registry.
+var ttsVoiceTiers = []struct {
+	minLogins int64
+	voices    []string
+}{
+	{0, []string{"en_us_001", "en_us_002", "en_us_006", "en_us_007", "en_us_009", "en_us_010", "en_uk_001", "en_uk_003", "en_au_001", "en_au_002"}},
+	{10, []string{"en_male_narration", "en_male_funny", "en_female_emotional", "en_male_cody", "en_female_samc"}},
+	{30, []string{"en_us_ghostface", "en_us_stormtrooper", "en_us_rocket", "en_us_c3po", "en_us_chewbacca", "en_us_deadpool"}},
+}
+
+// ttsVoiceFor picks a stable voice for a chatter: hash of username over the
+// pool their logins unlock. A chatter always sounds like themselves until
+// crossing a tier threshold grows the pool (and may reshuffle their voice).
+func ttsVoiceFor(name string, logins int64) string {
+	var pool []string
+	for _, tier := range ttsVoiceTiers {
+		if logins >= tier.minLogins {
+			pool = append(pool, tier.voices...)
+		}
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(strings.ToLower(name)))
+	return pool[int(h.Sum32())%len(pool)]
+}
+
+// ttsManager turns possessed party members' chat into mp3 clips via the
+// tts_service container, caches them in memory, and serves them back to the
+// overlay at /tts/<id>.mp3 so the OBS browser source plays the audio (§9).
+type ttsManager struct {
+	serviceURL string
+	hub        *overlayHub
+	client     *http.Client
+
+	mu    sync.Mutex
+	clips map[string][]byte
+	order []string
+	next  int64
+}
+
+const ttsClipCacheMax = 50
+
+func newTTSManager(serviceURL string, hub *overlayHub) *ttsManager {
+	return &ttsManager{
+		serviceURL: serviceURL,
+		hub:        hub,
+		client:     &http.Client{Timeout: 30 * time.Second},
+		clips:      map[string][]byte{},
+	}
+}
+
+func (t *ttsManager) store(audio []byte) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.next++
+	id := fmt.Sprintf("%d-%d", time.Now().Unix(), t.next)
+	t.clips[id] = audio
+	t.order = append(t.order, id)
+	if len(t.order) > ttsClipCacheMax {
+		delete(t.clips, t.order[0])
+		t.order = t.order[1:]
+	}
+	return id
+}
+
+func (t *ttsManager) serveClip(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/tts/"), ".mp3")
+	t.mu.Lock()
+	audio, ok := t.clips[id]
+	t.mu.Unlock()
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "audio/mpeg")
+	_, _ = w.Write(audio)
+}
+
+// speak synthesizes text and broadcasts tts.play. Run it in its own
+// goroutine — synthesis latency must never block chat handling.
+func (t *ttsManager) speak(name string, logins int64, text string) {
+	voice := ttsVoiceFor(name, logins)
+	body, _ := json.Marshal(map[string]string{"text": text, "voice": voice})
+	resp, err := t.client.Post(t.serviceURL+"/tts", "application/json", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("tts: request failed: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("tts: service returned %s for %s (%s)", resp.Status, name, voice)
+		return
+	}
+	audio, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("tts: reading audio: %v", err)
+		return
+	}
+	id := t.store(audio)
+	duration, _ := strconv.Atoi(resp.Header.Get("X-Duration-Seconds"))
+	broadcastJSON(t.hub, map[string]any{
+		"type":     "tts.play",
+		"name":     name,
+		"url":      "/tts/" + id + ".mp3",
+		"duration": duration,
+	})
+}
+
+// speakPartyMessage TTSes a chat message if the sender's character is
+// currently possessed (in the party) and the message isn't a command.
+func speakPartyMessage(event map[string]any, messageText string, party *partyManager, tts *ttsManager) {
+	text := strings.TrimSpace(messageText)
+	if text == "" || strings.HasPrefix(text, "!") || strings.HasPrefix(text, "#") {
+		return
+	}
+	username := firstString(event["chatter_user_login"], event["chatter_user_name"], "")
+	if username == "" {
+		return
+	}
+	c := party.findInParty(username)
+	if c == nil {
+		return
+	}
+	go tts.speak(c.Name, c.Logins, text)
 }
 
 type characterStore struct {
@@ -960,16 +1090,18 @@ func main() {
 	other := newOtherManager(hub)
 	party := newPartyManager(hub)
 	expCooldown := newExpCooldownTracker()
+	tts := newTTSManager(cfg.ttsServiceURL, hub)
 	go hub.run(ctx)
 	go startPongTicker(ctx, other)
 	go func() {
-		if err := consumeChat(ctx, cfg, hub, other, store, characters, party, expCooldown, botCommands, commandPublisher); err != nil {
+		if err := consumeChat(ctx, cfg, hub, other, store, characters, party, expCooldown, botCommands, commandPublisher, tts); err != nil {
 			log.Fatalf("rabbitmq consumer stopped: %v", err)
 		}
 	}()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws/overlay", hub.handleWS)
+	mux.HandleFunc("/tts/", tts.serveClip)
 	mux.Handle("/", http.FileServer(http.Dir(cfg.staticDir)))
 
 	srv := &http.Server{Addr: ":" + cfg.httpPort, Handler: mux}
@@ -997,6 +1129,7 @@ func loadConfig() config {
 		httpPort:       env("OVERLAY_HTTP_PORT", "8080"),
 		staticDir:      env("OVERLAY_STATIC_DIR", "./overlay"),
 		mysqlDSN:		env("MYSQL_DSN", "echoes:echoespw@tcp(mysql:3306)/echoes?parseTime=true"),
+		ttsServiceURL:  env("TTS_SERVICE_URL", "http://tts_service:8081"),
 	}
 }
 
@@ -1007,7 +1140,7 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher) error {
+func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher, tts *ttsManager) error {
 	for {
 		conn, err := amqp.Dial(cfg.rabbitURL)
 		if err != nil {
@@ -1071,7 +1204,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 					consumeLoop = false
 					break
 				}
-				handleDelivery(ctx, d, hub, other, store, characters, party, expCooldown, botCommands, commands)
+				handleDelivery(ctx, d, hub, other, store, characters, party, expCooldown, botCommands, commands, tts)
 			case <-reconnect:
 				consumeLoop = false
 			case <-ctx.Done():
@@ -1089,7 +1222,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 	}
 }
 
-func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher) {
+func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher, tts *ttsManager) {
 	defer d.Ack(false)
 
 	var payload eventPayload
@@ -1105,7 +1238,7 @@ func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other
 
 	switch eventType {
 	case "channel.chat.message":
-		handleChatEvent(ctx, payload.Event, hub, other, characters, party, expCooldown, botCommands, commands)
+		handleChatEvent(ctx, payload.Event, hub, other, characters, party, expCooldown, botCommands, commands, tts)
 	case "channel.channel_points_custom_reward_redemption.add":
 		handleRedeemEvent(ctx, payload.Event, other, store, characters, party, commands)
 	default:
@@ -1262,7 +1395,7 @@ func normalizeMarkdownInput(input string) string {
 	return normalized
 }
 
-func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub, other *otherManager, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher) {
+func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub, other *otherManager, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher, tts *ttsManager) {
 	if event == nil {
 		return
 	}
@@ -1275,6 +1408,7 @@ func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub,
 	}
 
 	grantMessageExp(ctx, event, characters, party, expCooldown)
+	speakPartyMessage(event, messageText, party, tts)
 
 	if isAuthorizedForOther(event) {
 		handleDMCommand(ctx, event, lower, messageText, other, characters, party, commands)
@@ -1600,6 +1734,42 @@ func handleDMCommand(ctx context.Context, event map[string]any, lower, messageTe
 		c.Alive = true
 		persist(c)
 		reply("✨ %s rises again at level %d (%d/%d hp)", c.Name, c.Level, c.HP, c.MaxHP)
+
+	case strings.HasPrefix(lower, "!roll "):
+		if len(fields) != 2 {
+			reply("usage: !roll <name>")
+			return
+		}
+		c, err := resolveForEdit(fields[1])
+		if err != nil || c == nil {
+			reply("!roll: no character named %s", fields[1])
+			return
+		}
+		roll := rand.Intn(20) + 1
+		total := roll + c.Level
+		crit := ""
+		switch roll {
+		case 20:
+			crit = "nat20"
+		case 1:
+			crit = "nat1"
+		}
+		broadcastJSON(party.hub, map[string]any{
+			"type":  "roll.result",
+			"name":  c.Name,
+			"roll":  roll,
+			"level": c.Level,
+			"total": total,
+			"crit":  crit,
+		})
+		switch crit {
+		case "nat20":
+			reply("🎲 %s rolls a NATURAL 20! %d + %d = %d", c.Name, roll, c.Level, total)
+		case "nat1":
+			reply("🎲 %s rolls a natural 1... %d + %d = %d", c.Name, roll, c.Level, total)
+		default:
+			reply("🎲 %s rolls %d + %d = %d", c.Name, roll, c.Level, total)
+		}
 
 	case strings.HasPrefix(lower, "!give "):
 		if len(fields) != 3 {

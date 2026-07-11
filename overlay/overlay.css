@@ -95,20 +95,21 @@ html, body {
 
 .party-card {
   width: 116px;
-  background: rgba(20, 14, 8, 0.82);
-  border: 2px solid #caa25c;
-  border-radius: 8px;
-  padding: 6px;
+  background: url('assets/ScrollBG.png');
+  background-size: 100% 100%;
+  /* extra vertical padding keeps content off the scroll's rolled ends */
+  padding: 18px 14px;
   box-sizing: border-box;
   font-family: 'Inter', sans-serif;
-  color: #f2e6d0;
+  color: #3b2a17;
   text-align: center;
-  box-shadow: 0 0 12px 2px rgba(255, 210, 120, 0.55);
+  filter: drop-shadow(0 0 6px rgba(255, 210, 120, 0.55));
 }
 
 .party-card .avatar {
   width: 40px;
   height: 40px;
+  object-fit: contain;
   display: block;
   margin: 0 auto 4px;
 }
@@ -151,4 +152,114 @@ html, body {
 .party-card .bar-label {
   font-size: 9px;
   opacity: 0.8;
+}
+
+/* On-screen d20 (!roll) — centered in the upper content area, hidden until
+   a roll.result arrives, cleared again a few seconds after settling. */
+#roll-box {
+  position: absolute;
+  left: 50%;
+  top: 34%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  font-family: 'Inter', sans-serif;
+  color: #f2e6d0;
+}
+
+#roll-box .die {
+  width: 140px;
+  height: 140px;
+  margin: 0 auto 10px;
+  background: linear-gradient(160deg, #3a3a44, #23232b);
+  clip-path: polygon(50% 0%, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%);
+  filter: drop-shadow(0 0 10px rgba(255, 210, 120, 0.6));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#roll-box .die-value {
+  font-size: 46px;
+  font-weight: bold;
+}
+
+#roll-box .roll-math {
+  font-size: 22px;
+  font-weight: bold;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.8);
+  min-height: 26px;
+}
+
+#roll-box .roll-name {
+  font-size: 16px;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.8);
+}
+
+#roll-box.rolling .die {
+  animation: die-shake 0.09s infinite;
+}
+
+#roll-box.settled .die {
+  animation: die-settle 0.3s ease-out;
+}
+
+#roll-box.nat20 .die {
+  background: linear-gradient(160deg, #ffe27a, #d9a62e);
+  filter: drop-shadow(0 0 24px rgba(255, 215, 80, 0.95));
+  animation: die-settle 0.3s ease-out, nat20-pulse 1s ease-in-out 0.3s infinite;
+}
+
+#roll-box.nat20 .die-value {
+  color: #3b2a17;
+}
+
+#roll-box.nat1 .die {
+  background: linear-gradient(160deg, #5c1f1a, #2e0d0b);
+  filter: drop-shadow(0 0 18px rgba(220, 60, 40, 0.9));
+  animation: die-settle 0.3s ease-out, nat1-slump 0.6s ease-out 0.3s forwards;
+}
+
+#roll-box.nat1 .die-value {
+  color: #e8918a;
+}
+
+@keyframes die-shake {
+  0% { transform: rotate(-7deg); }
+  50% { transform: rotate(7deg); }
+  100% { transform: rotate(-7deg); }
+}
+
+@keyframes die-settle {
+  from { transform: scale(1.4); }
+  to { transform: scale(1); }
+}
+
+@keyframes nat20-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
+
+@keyframes nat1-slump {
+  to { transform: rotate(14deg) translateY(6px); }
+}
+
+#roll-box .confetti {
+  position: absolute;
+  left: 50%;
+  top: 46px;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  animation: confetti-burst 1.5s ease-out forwards;
+}
+
+@keyframes confetti-burst {
+  from {
+    transform: translate(0, 0) rotate(0deg);
+    opacity: 1;
+  }
+  to {
+    transform: translate(var(--dx), calc(var(--dy) + 130px)) rotate(540deg);
+    opacity: 0;
+  }
 }

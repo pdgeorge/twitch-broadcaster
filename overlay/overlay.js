@@ -15,7 +15,7 @@
       const card = document.createElement('div');
       card.className = 'party-card';
       card.innerHTML = `
-        <img class="avatar" src="assets/dude.svg" style="filter: hue-rotate(${hue}deg)" alt="${escapeHTML(member.name || '')}" />
+        <img class="avatar" src="assets/Dabling.png" style="filter: hue-rotate(${hue}deg)" alt="${escapeHTML(member.name || '')}" />
         <div class="name">${escapeHTML(member.name || '')}</div>
         <div class="level">Lv ${member.level ?? 1}</div>
         <div class="bar"><div class="bar-fill hp-fill" style="width:${hpPct}%"></div></div>
@@ -25,6 +25,109 @@
       `;
       partyCardsBox.appendChild(card);
     });
+  }
+
+  const rollBox = document.getElementById('roll-box');
+  let rollHideTimer = null;
+  let rollCycleTimer = null;
+  let audioCtx = null;
+
+  function beep(freq, startOffset, duration, type, volume) {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.value = freq;
+    const t = audioCtx.currentTime + startOffset;
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(volume, t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + duration);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t);
+    osc.stop(t + duration + 0.05);
+  }
+
+  function ensureAudio() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+
+  // Synthesized placeholder jingles — swap for real audio assets later.
+  function playFanfare() {
+    ensureAudio();
+    [[523.25, 0, 0.12], [659.25, 0.12, 0.12], [783.99, 0.24, 0.12], [1046.5, 0.36, 0.5]]
+      .forEach(([f, s, d]) => beep(f, s, d, 'triangle', 0.2));
+  }
+
+  function playWomp() {
+    ensureAudio();
+    [[233.08, 0, 0.28], [220, 0.3, 0.28], [207.65, 0.6, 0.7]]
+      .forEach(([f, s, d]) => beep(f, s, d, 'sawtooth', 0.12));
+  }
+
+  function burstConfetti() {
+    const colors = ['#f8d34a', '#e0533d', '#4a9de0', '#67c76a', '#c76ac2'];
+    for (let i = 0; i < 28; i++) {
+      const p = document.createElement('span');
+      p.className = 'confetti';
+      const angle = Math.random() * 2 * Math.PI;
+      const dist = 90 + Math.random() * 130;
+      p.style.setProperty('--dx', `${Math.cos(angle) * dist}px`);
+      p.style.setProperty('--dy', `${Math.sin(angle) * dist - 60}px`);
+      p.style.background = colors[i % colors.length];
+      p.style.animationDelay = `${Math.random() * 120}ms`;
+      rollBox.appendChild(p);
+      setTimeout(() => p.remove(), 1700);
+    }
+  }
+
+  function showRoll(payload) {
+    clearTimeout(rollHideTimer);
+    clearInterval(rollCycleTimer);
+    const crit = payload.crit || '';
+    rollBox.className = 'rolling';
+    rollBox.innerHTML = `
+      <div class="die"><span class="die-value">?</span></div>
+      <div class="roll-math"></div>
+      <div class="roll-name">${escapeHTML(payload.name || '')}</div>
+    `;
+    const valueEl = rollBox.querySelector('.die-value');
+    const mathEl = rollBox.querySelector('.roll-math');
+    let ticks = 0;
+    rollCycleTimer = setInterval(() => {
+      ticks++;
+      valueEl.textContent = 1 + Math.floor(Math.random() * 20);
+      if (ticks >= 12) {
+        clearInterval(rollCycleTimer);
+        valueEl.textContent = payload.roll;
+        mathEl.textContent = `${payload.roll} + ${payload.level} = ${payload.total}`;
+        rollBox.className = crit ? `settled ${crit}` : 'settled';
+        if (crit === 'nat20') {
+          playFanfare();
+          burstConfetti();
+        } else if (crit === 'nat1') {
+          playWomp();
+        }
+        rollHideTimer = setTimeout(() => {
+          rollBox.className = '';
+          rollBox.innerHTML = '';
+        }, crit ? 8000 : 6000);
+      }
+    }, 90);
+  }
+
+  const ttsQueue = [];
+  let ttsPlaying = false;
+
+  function playNextTTS() {
+    const next = ttsQueue.shift();
+    if (!next) {
+      ttsPlaying = false;
+      return;
+    }
+    ttsPlaying = true;
+    const audio = new Audio(next.url);
+    audio.onended = playNextTTS;
+    audio.onerror = playNextTTS;
+    audio.play().catch(playNextTTS);
   }
 
   const emoteStores = {
@@ -264,6 +367,15 @@
 
         if (payload.type === 'party.update') {
           renderPartyCards(payload.members);
+        }
+
+        if (payload.type === 'tts.play') {
+          ttsQueue.push(payload);
+          if (!ttsPlaying) playNextTTS();
+        }
+
+        if (payload.type === 'roll.result') {
+          showRoll(payload);
         }
       } catch (err) {
         console.error('Failed to parse message', err);
