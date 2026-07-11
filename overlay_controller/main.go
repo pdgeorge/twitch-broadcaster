@@ -1564,6 +1564,43 @@ func handleDMCommand(ctx context.Context, event map[string]any, lower, messageTe
 		persist(c)
 		reply("%s healed to %d/%d hp", c.Name, c.HP, c.MaxHP)
 
+	case strings.HasPrefix(lower, "!revive "):
+		if len(fields) != 2 && len(fields) != 3 {
+			reply("usage: !revive <name> [levels]")
+			return
+		}
+		cost := 1
+		if len(fields) == 3 {
+			n, err := strconv.Atoi(fields[2])
+			if err != nil || n < 0 {
+				reply("!revive: %q isn't a non-negative number", fields[2])
+				return
+			}
+			cost = n
+		}
+		c, err := resolveForEdit(fields[1])
+		if err != nil || c == nil {
+			reply("!revive: no character named %s", fields[1])
+			return
+		}
+		if c.Alive {
+			reply("%s isn't dead", c.Name)
+			return
+		}
+		// Revival is what costs (design doc §3): dock levels via exp deduction,
+		// then bring them back at full HP for the new (lower) level.
+		newLevel := c.Level - cost
+		if newLevel < 1 {
+			newLevel = 1
+		}
+		c.Exp = totalExpForLevel(newLevel)
+		c.Level = newLevel
+		c.MaxHP = 10 + newLevel*4
+		c.HP = c.MaxHP
+		c.Alive = true
+		persist(c)
+		reply("✨ %s rises again at level %d (%d/%d hp)", c.Name, c.Level, c.HP, c.MaxHP)
+
 	case strings.HasPrefix(lower, "!give "):
 		if len(fields) != 3 {
 			reply("usage: !give <name> <amount|cosmetic>")
