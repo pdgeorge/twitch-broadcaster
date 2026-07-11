@@ -15,7 +15,7 @@
       const card = document.createElement('div');
       card.className = 'party-card';
       card.innerHTML = `
-        <img class="avatar" src="assets/dude.svg" style="filter: hue-rotate(${hue}deg)" alt="${escapeHTML(member.name || '')}" />
+        <img class="avatar" src="assets/Dabling.png" style="filter: hue-rotate(${hue}deg)" alt="${escapeHTML(member.name || '')}" />
         <div class="name">${escapeHTML(member.name || '')}</div>
         <div class="level">Lv ${member.level ?? 1}</div>
         <div class="bar"><div class="bar-fill hp-fill" style="width:${hpPct}%"></div></div>

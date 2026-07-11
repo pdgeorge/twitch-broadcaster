@@ -95,20 +95,21 @@ html, body {
 
 .party-card {
   width: 116px;
-  background: rgba(20, 14, 8, 0.82);
-  border: 2px solid #caa25c;
-  border-radius: 8px;
-  padding: 6px;
+  background: url('assets/ScrollBG.png');
+  background-size: 100% 100%;
+  /* extra vertical padding keeps content off the scroll's rolled ends */
+  padding: 18px 14px;
   box-sizing: border-box;
   font-family: 'Inter', sans-serif;
-  color: #f2e6d0;
+  color: #3b2a17;
   text-align: center;
-  box-shadow: 0 0 12px 2px rgba(255, 210, 120, 0.55);
+  filter: drop-shadow(0 0 6px rgba(255, 210, 120, 0.55));
 }
 
 .party-card .avatar {
   width: 40px;
   height: 40px;
+  object-fit: contain;
   display: block;
   margin: 0 auto 4px;
 }

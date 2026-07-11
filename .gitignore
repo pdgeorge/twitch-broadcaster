@@ -13,6 +13,8 @@ venv
 test*
 *.kra
 *.png
+!resources/*.png
+!overlay/assets/*.png
 
 # Go build artifact (go build in overlay_controller/ drops the binary here)
 overlay_controller/overlay_controller
