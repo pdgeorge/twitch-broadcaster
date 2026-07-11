@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -1733,6 +1734,42 @@ func handleDMCommand(ctx context.Context, event map[string]any, lower, messageTe
 		c.Alive = true
 		persist(c)
 		reply("✨ %s rises again at level %d (%d/%d hp)", c.Name, c.Level, c.HP, c.MaxHP)
+
+	case strings.HasPrefix(lower, "!roll "):
+		if len(fields) != 2 {
+			reply("usage: !roll <name>")
+			return
+		}
+		c, err := resolveForEdit(fields[1])
+		if err != nil || c == nil {
+			reply("!roll: no character named %s", fields[1])
+			return
+		}
+		roll := rand.Intn(20) + 1
+		total := roll + c.Level
+		crit := ""
+		switch roll {
+		case 20:
+			crit = "nat20"
+		case 1:
+			crit = "nat1"
+		}
+		broadcastJSON(party.hub, map[string]any{
+			"type":  "roll.result",
+			"name":  c.Name,
+			"roll":  roll,
+			"level": c.Level,
+			"total": total,
+			"crit":  crit,
+		})
+		switch crit {
+		case "nat20":
+			reply("🎲 %s rolls a NATURAL 20! %d + %d = %d", c.Name, roll, c.Level, total)
+		case "nat1":
+			reply("🎲 %s rolls a natural 1... %d + %d = %d", c.Name, roll, c.Level, total)
+		default:
+			reply("🎲 %s rolls %d + %d = %d", c.Name, roll, c.Level, total)
+		}
 
 	case strings.HasPrefix(lower, "!give "):
 		if len(fields) != 3 {
