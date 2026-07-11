@@ -68,12 +68,14 @@ Catch-up flavor (optional, post-MVP): exp gain +50% while below the party's medi
 
 ```sql
 ALTER TABLE chatters
-  ADD COLUMN IF NOT EXISTS level  INT  NOT NULL DEFAULT 1,
-  ADD COLUMN IF NOT EXISTS hp     INT  NOT NULL DEFAULT 14,
-  ADD COLUMN IF NOT EXISTS max_hp INT  NOT NULL DEFAULT 14,
-  ADD COLUMN IF NOT EXISTS alive  TINYINT(1) NOT NULL DEFAULT 1,
-  ADD COLUMN IF NOT EXISTS sheet  JSON NULL;  -- reserved, unused: class/abilities/inventory/unlocks
+  ADD COLUMN level  INT  NOT NULL DEFAULT 1,
+  ADD COLUMN hp     INT  NOT NULL DEFAULT 14,
+  ADD COLUMN max_hp INT  NOT NULL DEFAULT 14,
+  ADD COLUMN alive  TINYINT(1) NOT NULL DEFAULT 1,
+  ADD COLUMN sheet  JSON NULL;  -- reserved, unused: class/abilities/inventory/unlocks
 ```
+
+MySQL 8 has no `ADD COLUMN IF NOT EXISTS` (that's MariaDB), so the migration runs each `ADD COLUMN` separately and treats MySQL error 1060 (duplicate column) as "already migrated" — found the hard way on first Pi deploy (2026-07-11).
 
 Implemented in `characterStore.init` (`overlay_controller/main.go`), run at startup alongside the existing `chatters` table creation.
 

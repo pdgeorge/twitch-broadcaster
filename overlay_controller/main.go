@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"html"
@@ -22,7 +23,7 @@ import (
         "github.com/gorilla/websocket"
         amqp "github.com/rabbitmq/amqp091-go"
         "github.com/yuin/goldmark"
-        _ "github.com/go-sql-driver/mysql"
+        "github.com/go-sql-driver/mysql"
 )
 
 type config struct {
@@ -338,15 +339,25 @@ func newCharacterStore(db *sql.DB) *characterStore {
 }
 
 func (s *characterStore) init(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `
-	ALTER TABLE chatters
-	  ADD COLUMN IF NOT EXISTS level  INT  NOT NULL DEFAULT 1,
-	  ADD COLUMN IF NOT EXISTS hp     INT  NOT NULL DEFAULT 14,
-	  ADD COLUMN IF NOT EXISTS max_hp INT  NOT NULL DEFAULT 14,
-	  ADD COLUMN IF NOT EXISTS alive  TINYINT(1) NOT NULL DEFAULT 1,
-	  ADD COLUMN IF NOT EXISTS sheet  JSON NULL
-	`)
-	return err
+	// MySQL 8 has no ADD COLUMN IF NOT EXISTS (MariaDB-only), so add columns
+	// one at a time and treat error 1060 (duplicate column) as already migrated.
+	columns := []string{
+		"level  INT  NOT NULL DEFAULT 1",
+		"hp     INT  NOT NULL DEFAULT 14",
+		"max_hp INT  NOT NULL DEFAULT 14",
+		"alive  TINYINT(1) NOT NULL DEFAULT 1",
+		"sheet  JSON NULL",
+	}
+	for _, col := range columns {
+		if _, err := s.db.ExecContext(ctx, "ALTER TABLE chatters ADD COLUMN "+col); err != nil {
+			var mysqlErr *mysql.MySQLError
+			if errors.As(err, &mysqlErr) && mysqlErr.Number == 1060 {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 func scanCharacter(row *sql.Row) (*character, error) {
