@@ -21,7 +21,7 @@ Requirements:
   OBS_PASSWORD
   OBS_JIGGLE_SOURCE   (name of the OBS source to jiggle, e.g. "HorseIcon")
 
-Depends on: OBS_Websocket.py (OBSWebsocketsManager) in the same directory.
+Depends on: OBS_Websocket.py (OBSWebsocketsManager), now in desktop_tools/ — see this folder's README. ARCHIVED: one/two-stream experiment, retired.
 """
 
 import base64

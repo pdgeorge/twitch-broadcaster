@@ -1,6 +1,6 @@
 # Twitch broadcaster stack
 
-This repository defines a Twitch EventSub receiver that republishes channel events to RabbitMQ so they can be consumed by any downstream service. A helper `background.py` example shows how to listen for events and print them to the terminal.
+This repository defines a Twitch EventSub receiver that republishes channel events to RabbitMQ so they can be consumed by any downstream service. A helper `desktop_tools/background.py` example shows how to listen for events and print them to the terminal.
 
 ## Prerequisites
 
@@ -48,7 +48,7 @@ Messages published to RabbitMQ use the Twitch EventSub type as the `properties.t
 
 ## Consuming events with `background.py`
 
-`background.py` is a lightweight example that binds a queue to the `twitch_events` fanout exchange. It ships with helper handlers so you can pick which events to print:
+`desktop_tools/background.py` is a lightweight example that binds a queue to the `twitch_events` fanout exchange. Like everything in `desktop_tools/` it runs on the streaming desktop rather than the Pi. It ships with helper handlers so you can pick which events to print:
 
 - `handle_all_events` (commented out by default) for every Twitch event.
 - `handle_channel_points_only` for only `channel.channel_points_custom_reward_redemption.add`.
@@ -57,7 +57,7 @@ Messages published to RabbitMQ use the Twitch EventSub type as the `properties.t
 
 ```
 pip install pika
-python background.py
+python desktop_tools/background.py
 ```
 
 Environment variables you can override:
