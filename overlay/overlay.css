@@ -154,6 +154,59 @@ html, body {
   opacity: 0.8;
 }
 
+/* Ambient tavern walking strip (design doc §7): bottom of screen, 25% ->
+   100% of the width. Placeholder geometry — adjust when real background art
+   fixes the tavern bounds. Dudes never leave this strip. */
+#tavern-area {
+  position: absolute;
+  left: 25%;
+  right: 0;
+  bottom: 0;
+  height: 260px;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.tavern-dude {
+  position: absolute;
+  bottom: 0;
+  text-align: center;
+}
+
+.tavern-dude .dude-sprite img {
+  height: var(--dude-height, 96px);
+  display: block;
+  margin: 0 auto;
+  animation: dude-bob 2.6s ease-in-out infinite;
+}
+
+.tavern-dude .dude-name {
+  font-family: 'Inter', sans-serif;
+  font-size: 12px;
+  color: #f2e6d0;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+  white-space: nowrap;
+}
+
+/* Walking waddle: rocks on the feet while the left transition runs, then the
+   .walking class drops off and the idle bob takes back over. */
+.tavern-dude.walking .dude-sprite img {
+  transform-origin: 50% 100%;
+  animation: dude-waddle 0.45s ease-in-out infinite;
+}
+
+@keyframes dude-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+
+@keyframes dude-waddle {
+  0%, 100% { transform: rotate(-6deg); }
+  25% { transform: rotate(0deg) translateY(-3px); }
+  50% { transform: rotate(6deg); }
+  75% { transform: rotate(0deg) translateY(-3px); }
+}
+
 /* On-screen d20 (!roll) — centered in the upper content area, hidden until
    a roll.result arrives, cleared again a few seconds after settling. */
 #roll-box {
