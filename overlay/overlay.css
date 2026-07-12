@@ -188,9 +188,23 @@ html, body {
   white-space: nowrap;
 }
 
+/* Walking waddle: rocks on the feet while the left transition runs, then the
+   .walking class drops off and the idle bob takes back over. */
+.tavern-dude.walking .dude-sprite img {
+  transform-origin: 50% 100%;
+  animation: dude-waddle 0.45s ease-in-out infinite;
+}
+
 @keyframes dude-bob {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-4px); }
+}
+
+@keyframes dude-waddle {
+  0%, 100% { transform: rotate(-6deg); }
+  25% { transform: rotate(0deg) translateY(-3px); }
+  50% { transform: rotate(6deg); }
+  75% { transform: rotate(0deg) translateY(-3px); }
 }
 
 /* On-screen d20 (!roll) — centered in the upper content area, hidden until

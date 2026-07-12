@@ -39,12 +39,16 @@
   function wanderTo(dude) {
     const x = 2 + Math.random() * 88; // % across the walking strip
     const distance = Math.abs(x - (dude.x ?? x));
-    dude.el.style.transition = `left ${(2 + distance * 0.12).toFixed(1)}s linear`;
+    const duration = 2 + distance * 0.12;
+    dude.el.style.transition = `left ${duration.toFixed(1)}s linear`;
     dude.el.style.left = `${x}%`;
     const sprite = dude.el.querySelector('.dude-sprite');
     if (x < dude.x) sprite.style.transform = 'scaleX(-1)';
     else if (x > dude.x) sprite.style.transform = 'scaleX(1)';
     dude.x = x;
+    dude.el.classList.add('walking');
+    clearTimeout(dude.walkTimer);
+    dude.walkTimer = setTimeout(() => dude.el.classList.remove('walking'), duration * 1000);
   }
 
   function scheduleWander(dude) {
@@ -58,6 +62,7 @@
     const dude = tavernDudes.get(key);
     if (!dude) return;
     clearTimeout(dude.wanderTimer);
+    clearTimeout(dude.walkTimer);
     dude.el.remove();
     tavernDudes.delete(key);
   }
