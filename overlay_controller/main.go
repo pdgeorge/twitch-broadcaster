@@ -1105,17 +1105,21 @@ func (t *tavernManager) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			t.mu.Lock()
-			cutoff := time.Now().Add(-tavernIdleTimeout)
-			for key, d := range t.dudes {
-				if d.LastSeen.Before(cutoff) {
-					delete(t.dudes, key)
-				}
-			}
-			t.broadcastLocked()
-			t.mu.Unlock()
+			t.sweep(time.Now().Add(-tavernIdleTimeout))
 		}
 	}
+}
+
+// sweep drops dudes last seen before cutoff and rebroadcasts the roster.
+func (t *tavernManager) sweep(cutoff time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for key, d := range t.dudes {
+		if d.LastSeen.Before(cutoff) {
+			delete(t.dudes, key)
+		}
+	}
+	t.broadcastLocked()
 }
 
 // trackTavernPresence counts any chat message as being in the tavern, unless

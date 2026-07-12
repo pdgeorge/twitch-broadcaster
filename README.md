@@ -92,6 +92,10 @@ An overlay controller service streams `channel.chat.message` events to browser c
 - **Channel point reward titled “announcement”**: when redeemed, the lower box shows the submitted text (Markdown supported) for five minutes.
 - **`!fire`** (broadcaster/moderators): clears any active announcement early and restores the last `!other` content.
 
+## Tests
+
+The game logic that guards persistent character state (level curve, exp/HP rules, party and tavern membership, DM-command authorization, chat HTML escaping) is covered by `overlay_controller/main_test.go` — run `go test ./...` from `overlay_controller/`. The plumbing (websockets, RabbitMQ, MySQL, the overlay page itself) is deliberately untested: it fails loudly, the math fails silently.
+
 ## Notes on long-running operation
 
 - Tokens are refreshed on startup and then every 80% of their reported lifetime to keep the container running indefinitely (including resource-constrained devices such as Raspberry Pi).
