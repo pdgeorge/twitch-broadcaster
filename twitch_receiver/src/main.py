@@ -205,6 +205,7 @@ class TwitchEventSubClient:
             {"type": "channel.vip.add", "version": "1", "condition": moderator_condition},
             {"type": "channel.vip.remove", "version": "1", "condition": moderator_condition},
             {"type": "channel.chat.message", "version": "1", "condition": chat_condition},
+            {"type": "stream.online", "version": "1", "condition": broadcaster_condition},
         ]
 
     async def subscribe_all(self, session_id: str) -> None:
