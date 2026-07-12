@@ -78,6 +78,13 @@ An overlay controller service streams `channel.chat.message` events to browser c
 - Twitch emotes are expanded server-side; the overlay page also auto-loads BTTV/FFZ/7TV global + channel emotes for richer chat rendering.
 - Environment variables for the overlay controller: `RABBITMQ_URL`, `RABBITMQ_EXCHANGE`, `OVERLAY_QUEUE`, `OVERLAY_HTTP_PORT`, `OVERLAY_STATIC_DIR`.
 
+### Overlay geometry (1920×1080 canvas, all set in `overlay/overlay.css`)
+
+- **Billboard (`.other-box`)**: 1160×148 px box at left 727, top 918. Padding (16px sides, 8px top/bottom) leaves a 1128×132 px content area; anything that doesn't fit is clipped (`overflow: hidden`), and text renders at 28px (`clamp(16px, 1.6vw, 28px)`) on a 1920-wide canvas.
+- **Chat box (`#chat-box`)**: 330 px wide at top 20, left 20, max-height 64vh (~691 px at 1080p). Monospace 16px ⇒ lines wrap at roughly 34 characters, including the `username:` prefix.
+- **Tavern walking strip (`#tavern-area`)**: bottom of screen, left 25% → right edge, 260 px tall (placeholder until real background art).
+- **Party cards (`.party-cards`)**: anchored bottom-right (right 20, bottom 172), 116 px per card, growing leftward.
+
 ### Chat commands
 
 - **`ping`** (any chatter): starts a brief Pong animation in the lower “other” box for about a minute.
