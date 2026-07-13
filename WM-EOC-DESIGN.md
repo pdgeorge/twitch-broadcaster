@@ -32,31 +32,31 @@ Removed (still pending, not part of M1): the pong game — delete `startPongTick
 
 ## 3. Progression rules
 
-Exp source: chat messages during stream. Flat exp per message with a 45s per-chatter cooldown (memory-only, lost on controller restart — that's fine, it just re-opens). `exp = 10 + logins/10` per successful grant, written to the `chatters` row immediately (not batched). `logins` is the same counter the existing "daily login bonus" redemption increments.
+Exp source: chat messages during stream. Flat exp per message with a 45s per-chatter cooldown (memory-only, lost on controller restart — that's fine, it just re-opens). `exp = 5 + floor(sqrt(logins))` per successful grant (v4; was `10 + logins/10` — see the pacing note below), written to the `chatters` row immediately (not batched). `logins` is the same counter the existing "daily login bonus" redemption increments.
 
-There is deliberately NO taming curve: high-login veterans are allowed to be "gods among men."
+Veterans still out-earn newcomers, but sublinearly: high-login chatters get a head start per message, not a multiplier that compounds with message volume. "Gods among men" now comes from accumulated exp across many streams, not from login count turbocharging a single chatty session.
 
-**Level curve (v3, finalized)**: a triangular curve anchored at "level 2 costs 10 exp." Cost to go from level *L* to *L+1* grows linearly (10, 20, 30, ...), so cumulative exp grows quadratically:
+**Level curve (v4)**: per-level cost is quadratic — going from level *L* to *L+1* costs `25 * L^2` exp (25, 100, 225, ...) — so cumulative exp grows cubically:
 
 ```
-total_exp(level) = 5 * level * (level - 1)
+total_exp(level) = 25 * (level-1) * level * (2*level - 1) / 6   // sum of squares, always an exact integer
 ```
 
 | level | total exp | exp for *this* level |
 |------:|----------:|----------------------:|
 | 1     | 0         | —                      |
-| 2     | 10        | 10                     |
-| 3     | 30        | 20                     |
-| 5     | 100       | 40                     |
-| 10    | 450       | 90                     |
-| 20    | 1900      | 190                    |
-| 30    | 4350      | 290                    |
+| 2     | 25        | 25                     |
+| 3     | 125       | 100                    |
+| 5     | 750       | 400                    |
+| 10    | 7125      | 2025                   |
+| 20    | 61750     | 9025                   |
+| 30    | 213875    | 21025                  |
 
-Rejected alternatives: a log curve would make each level *cheaper* than the last, which runs backwards from "leveling should feel earned"; a compounding exponential curve (e.g. `1.5^level`) explodes so fast that levels past ~15-20 become practically unreachable, undercutting the "gods among men" idea by making it unattainable rather than rare. Triangular sits in between — fast, rewarding early levels, a real grind later, no hard wall.
+**Pacing history**: v3 was a triangular curve (`total = 5*L*(L-1)`, per-level cost linear: 10, 20, 30, ...) fed by `10 + logins/10` exp/message. The v3 caveat ("a very active chatter can reach level ~20+ within a single long stream") materialized immediately: the first full playtest session produced three level-10s and a level-20. v4 (2026-07-13) fixes it from both ends — sqrt login scaling on the grant, quadratic per-level cost on the curve — targeting an average chatter at ~level 2-3 after an hour of steady chatting, with even a hyperactive veteran staying single-digit in one session. Because level is derived from exp, existing characters keep their banked exp and their levels deflate automatically under the new curve (e.g. 1900 exp: was level 20, now level 6). Tuning knobs live as constants in `overlay_controller/main.go`: `expMessageBase` (5) and `levelCostBase` (25).
 
-Implemented as `totalExpForLevel`/`levelForExp` in `overlay_controller/main.go` (inverts the formula via the quadratic equation, `int(math.Floor(...))`). `max_hp = 10 + level*4`; level-up restores HP to the new max.
+Rejected alternatives (still hold for v4): a log curve would make each level *cheaper* than the last, which runs backwards from "leveling should feel earned"; a compounding exponential curve (e.g. `1.5^level`) explodes so fast that levels past ~15-20 become practically unreachable, undercutting the "gods among men" idea by making it unattainable rather than rare. Quadratic per-level cost keeps early levels quick, makes the teens a real grind, and never becomes a hard wall.
 
-**Known pacing caveat**: at `10 + logins/10` exp/message on a 45s cooldown, a very active chatter can reach level ~20+ within a single long stream purely from message volume, largely independent of their login history. If level should track veteran status specifically rather than single-session grinding, that's a knob to revisit (e.g. weight exp gain more heavily by `logins`, or cap session exp) — not solved here, flagged for playtesting.
+Implemented as `expPerMessage`/`totalExpForLevel`/`levelForExp` in `overlay_controller/main.go` (`levelForExp` walks the curve instead of inverting the cubic — thresholds grow fast enough that the loop is trivially short). `max_hp = 10 + level*4`; level-up restores HP to the new max.
 
 Login-count unlock thresholds (10/30/60 logins → ability slot / TBD / prestige class+TTS; the middle slot was a resurrection token, cut as redundant) are **not implemented yet** — deferred past M1, tracked for a later milestone (see §7).
 
@@ -118,11 +118,12 @@ Gated with the existing `isAuthorizedForOther` badge/broadcaster check, in `hand
 !kick  <name>                 eject one party member
 !newparty                     eject the whole party, reopen all 4 slots
 !sheet <name>                 broadcast a character's sheet to the billboard (30s)
-!roll <name>                  Rolls a d20 on screen for <name> with name under it, adds their level to the result.
 !revive <name> [levels]       resurrect a dead character: costs them [levels] levels (default 1, as exp deduction), HP to new max, alive=1
 !fire                         (existing) cancel active announcement
 !other <markdown>             (existing) unchanged, still the base billboard content
 ```
+
+`!roll` moved out of this list (2026-07-13): it changes no state, so it's open to every chatter now — see §7a.
 
 ## 7. Tavern HUD behaviors (client)
 
@@ -148,13 +149,13 @@ Capped so a max-level veteran reads as "notably huge," not "bigger than the buil
 
 ## 7a. Encounter resolution (DM ruling, v3)
 
-Simple check mechanic for the DM to adjudicate possessed-party encounters: **`1d20 + level` vs. a challenge number**, success/fail, no other modifiers. `!roll <name>` shows the result on screen (IE: 16), as DM had manually chosen the challenge number.
+Simple check mechanic for the DM to adjudicate possessed-party encounters: **`1d20 + level` vs. a challenge number**, success/fail, no other modifiers. `!roll` shows the result on screen (IE: 16), as DM had manually chosen the challenge number.
 
-**Implemented (2026-07-12)**: `!roll <name>` broadcasts `roll.result {name, roll, level, total, crit}`; the overlay shows a d20 that cycles for ~1s, settles on the roll with `roll + level = total` and the name underneath, then clears after a few seconds. Natural 20: gold die, confetti burst, fanfare. Natural 1: the die slumps dark red with a sad-trombone womp. Both sounds are WebAudio-synthesized placeholders (no audio files — `*.mp3`/`*.wav` are gitignored anyway); swap for real assets whenever art/sound day comes. The chat reply mirrors the result so it's also on the record.
+**Implemented (2026-07-12, opened to all chatters 2026-07-13)**: `!roll` is usable by anyone, not just mods — a roll changes no state, so there was nothing to protect, and it lets chatters roll for themselves when the DM calls for a check. Bare `!roll` rolls for the sender's own character (created on the spot if they don't have one yet); `!roll <name>` rolls for a named character as before (error if no such character). Broadcasts `roll.result {name, roll, level, total, crit}`; the overlay shows a d20 that cycles for ~1s, settles on the roll with `roll + level = total` and the name underneath, then clears after a few seconds. Natural 20: gold die, confetti burst, fanfare. Natural 1: the die slumps dark red with a sad-trombone womp. Both sounds are WebAudio-synthesized placeholders (no audio files — `*.mp3`/`*.wav` are gitignored anyway); swap for real assets whenever art/sound day comes. The chat reply mirrors the result so it's also on the record. No cooldown yet — if chat discovers dice spam, a per-chatter cooldown on non-DM rolls is the obvious knob.
 
 ## 8. Explicit non-goals / decisions log
 
-No log-curve exp multiplier (veterans are allowed to dominate — community lore). Level curve is triangular, not exponential — chosen deliberately over a compounding curve so high levels stay hard, not impossible (v3, §3). No server-side animation — browser owns all tavern idle life once M2 exists. No possession timer (v2 change from v1 — party only changes via `!kick`/`!newparty`). No pong (unrelated cleanup, still pending, tracked separately from this milestone). Death is permadeath-until-`!revive` — auto-revive at next stream was considered and rejected: level is derived from exp, so a level tax alone is ~19 messages of exp at high level, a speed bump rather than a stake; the `alive` column stays for the same reason (§7 HP Regen). The resurrection-token login unlock was cut as redundant with `!revive`. Encounter outcomes stay a DM ruling — `!roll` (§6, §7a) only shows the die, it doesn't adjudicate. Memory of this design lives in this file, not in chat.
+No log-curve exp multiplier (veterans are allowed to dominate — community lore; the v4 sqrt login scaling softens *how fast* they dominate within one session, it doesn't cap where they end up). Level curve is quadratic-per-level, not exponential — chosen deliberately over a compounding curve so high levels stay hard, not impossible (v4, §3; v3's triangular curve was too fast in practice). No server-side animation — browser owns all tavern idle life once M2 exists. No possession timer (v2 change from v1 — party only changes via `!kick`/`!newparty`). No pong (unrelated cleanup, still pending, tracked separately from this milestone). Death is permadeath-until-`!revive` — auto-revive at next stream was considered and rejected: level is derived from exp, so a level tax alone is ~19 messages of exp at high level, a speed bump rather than a stake; the `alive` column stays for the same reason (§7 HP Regen). The resurrection-token login unlock was cut as redundant with `!revive`. Encounter outcomes stay a DM ruling — `!roll` (§6, §7a) only shows the die, it doesn't adjudicate. Memory of this design lives in this file, not in chat.
 
 **Superseded by merge** — EchoesOfChat rules that lost to the WM spec:
 

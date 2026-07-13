@@ -20,9 +20,9 @@ func newChar(name string, exp int64) *character {
 	return c
 }
 
-// The design doc §3 anchor table for the triangular curve.
+// The design doc §3 anchor table for the cubic (quadratic-per-level) curve.
 func TestTotalExpForLevel(t *testing.T) {
-	cases := map[int]int64{1: 0, 2: 10, 3: 30, 5: 100, 10: 450, 20: 1900, 30: 4350}
+	cases := map[int]int64{1: 0, 2: 25, 3: 125, 4: 350, 5: 750, 10: 7125, 20: 61750, 30: 213875}
 	for level, want := range cases {
 		if got := totalExpForLevel(level); got != want {
 			t.Errorf("totalExpForLevel(%d) = %d, want %d", level, got, want)
@@ -37,17 +37,19 @@ func TestLevelForExp(t *testing.T) {
 	}{
 		{-5, 1}, // negative clamps to level 1
 		{0, 1},
-		{9, 1}, // one short of a threshold must not round up
-		{10, 2},
-		{29, 2},
-		{30, 3},
-		{99, 4},
-		{100, 5},
-		{449, 9},
-		{450, 10},
-		{1899, 19},
-		{1900, 20},
-		{4350, 30},
+		{24, 1}, // one short of a threshold must not round up
+		{25, 2},
+		{124, 2},
+		{125, 3},
+		{349, 3},
+		{350, 4},
+		{749, 4},
+		{750, 5},
+		{7124, 9},
+		{7125, 10},
+		{61749, 19},
+		{61750, 20},
+		{213875, 30},
 	}
 	for _, tc := range cases {
 		if got := levelForExp(tc.exp); got != tc.want {
@@ -56,8 +58,19 @@ func TestLevelForExp(t *testing.T) {
 	}
 }
 
-// levelForExp must invert totalExpForLevel exactly at every threshold: the
-// float math in the quadratic inversion can't land a level early or late.
+// The per-message grant: flat base plus a sqrt(logins) veteran bonus — the
+// design doc §3 anchors, deliberately not linear in logins.
+func TestExpPerMessage(t *testing.T) {
+	cases := map[int64]int64{-1: 5, 0: 5, 1: 6, 25: 10, 100: 15, 400: 25}
+	for logins, want := range cases {
+		if got := expPerMessage(logins); got != want {
+			t.Errorf("expPerMessage(%d) = %d, want %d", logins, got, want)
+		}
+	}
+}
+
+// levelForExp must invert totalExpForLevel exactly at every threshold: a
+// level must never land early or late.
 func TestLevelCurveRoundTrip(t *testing.T) {
 	for level := 1; level <= 100; level++ {
 		threshold := totalExpForLevel(level)
@@ -73,11 +86,11 @@ func TestLevelCurveRoundTrip(t *testing.T) {
 }
 
 func TestExpNext(t *testing.T) {
-	if got := newChar("a", 0).expNext(); got != 10 {
-		t.Errorf("level-1 expNext = %d, want 10", got)
+	if got := newChar("a", 0).expNext(); got != 25 {
+		t.Errorf("level-1 expNext = %d, want 25", got)
 	}
-	if got := newChar("a", 10).expNext(); got != 30 {
-		t.Errorf("level-2 expNext = %d, want 30", got)
+	if got := newChar("a", 25).expNext(); got != 125 {
+		t.Errorf("level-2 expNext = %d, want 125", got)
 	}
 }
 
@@ -85,14 +98,14 @@ func TestApplyExp(t *testing.T) {
 	t.Run("level-up restores hp to new max", func(t *testing.T) {
 		c := newChar("a", 0)
 		c.HP = 3
-		c.applyExp(10)
+		c.applyExp(25)
 		if c.Level != 2 || c.MaxHP != 18 || c.HP != 18 {
 			t.Errorf("got level %d, hp %d/%d, want level 2, hp 18/18", c.Level, c.HP, c.MaxHP)
 		}
 	})
 
 	t.Run("gain without level-up keeps current hp", func(t *testing.T) {
-		c := newChar("a", 10)
+		c := newChar("a", 25)
 		c.HP = 5
 		c.applyExp(5)
 		if c.Level != 2 || c.HP != 5 {
@@ -102,7 +115,7 @@ func TestApplyExp(t *testing.T) {
 
 	t.Run("multi-level jump", func(t *testing.T) {
 		c := newChar("a", 0)
-		c.applyExp(100)
+		c.applyExp(750)
 		if c.Level != 5 || c.MaxHP != 30 || c.HP != 30 {
 			t.Errorf("got level %d, hp %d/%d, want level 5, hp 30/30", c.Level, c.HP, c.MaxHP)
 		}
@@ -111,8 +124,8 @@ func TestApplyExp(t *testing.T) {
 	t.Run("deduction caps hp at the lower max", func(t *testing.T) {
 		// The !smite / !revive-cost path: exp only ever goes down via DM
 		// commands, so this branch never runs in normal play.
-		c := newChar("a", 450) // level 10, 50/50 hp
-		c.applyExp(-400)       // exp 50 -> level 3
+		c := newChar("a", 7125) // level 10, 50/50 hp
+		c.applyExp(-7000)       // exp 125 -> level 3
 		if c.Level != 3 || c.MaxHP != 22 || c.HP != 22 {
 			t.Errorf("got level %d, hp %d/%d, want level 3, hp 22/22", c.Level, c.HP, c.MaxHP)
 		}
@@ -231,7 +244,7 @@ func TestTavernManager(t *testing.T) {
 	t.Run("touch tracks level changes", func(t *testing.T) {
 		tv := newTavernManager(newOverlayHub())
 		tv.touch(newChar("Dude", 0))
-		tv.touch(newChar("Dude", 10))
+		tv.touch(newChar("Dude", 25))
 		if got := tv.dudes["dude"].Level; got != 2 {
 			t.Errorf("roster level = %d, want 2", got)
 		}

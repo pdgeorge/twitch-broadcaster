@@ -16,27 +16,27 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
-	"strconv"
 
-        "github.com/gorilla/websocket"
-        amqp "github.com/rabbitmq/amqp091-go"
-        "github.com/yuin/goldmark"
-        "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
+	"github.com/gorilla/websocket"
+	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/yuin/goldmark"
 )
 
 type config struct {
-	rabbitURL      string
-	rabbitExchange string
+	rabbitURL       string
+	rabbitExchange  string
 	commandExchange string
-	queueName      string
-	httpPort       string
-	staticDir      string
-	mysqlDSN       string
-	ttsServiceURL  string
+	queueName       string
+	httpPort        string
+	staticDir       string
+	mysqlDSN        string
+	ttsServiceURL   string
 }
 
 type chatFragment struct {
@@ -74,8 +74,8 @@ type loginStore struct {
 }
 
 type botCommandStore struct {
-	db      *sql.DB
-	mu      sync.RWMutex
+	db       *sql.DB
+	mu       sync.RWMutex
 	commands map[string]string // trigger (lowercase) -> response
 }
 
@@ -280,25 +280,46 @@ type character struct {
 	Cosmetics []string
 }
 
-// totalExpForLevel is the cumulative exp required to *reach* level, using a
-// triangular curve anchored at level 2 = 10 exp: total(L) = 5*L*(L-1). Cost
-// per level grows linearly (10, 20, 30, ...), so total exp grows quadratically
-// — quick early levels, a real grind for veterans, never literally unreachable
-// the way a compounding-exponential curve would be. See DESIGN.md §3.
-func totalExpForLevel(level int) int64 {
-	l := int64(level)
-	return 5 * l * (l - 1)
+// expMessageBase is the flat exp every chatter earns per cooldown-gated
+// message; expPerMessage adds a sqrt(logins) veteran bonus on top.
+const expMessageBase = 5
+
+// levelCostBase scales the level curve: going from level L to L+1 costs
+// levelCostBase * L^2 exp.
+const levelCostBase = 25
+
+// expPerMessage is the exp granted per (cooldown-gated) chat message. The
+// login bonus scales with sqrt(logins), not linearly (v4): veterans still
+// out-earn newcomers, but login count can no longer multiply message volume
+// the way `10 + logins/10` did. See DESIGN.md §3.
+func expPerMessage(logins int64) int64 {
+	if logins < 0 {
+		logins = 0
+	}
+	return expMessageBase + int64(math.Sqrt(float64(logins)))
 }
 
-// levelForExp inverts totalExpForLevel by solving 5*L^2 - 5*L - exp = 0 for L.
-func levelForExp(exp int64) int {
-	if exp < 0 {
-		exp = 0
+// totalExpForLevel is the cumulative exp required to *reach* level. Per-level
+// cost is quadratic — levelCostBase*L^2 (25, 100, 225, ...) — so total exp
+// grows cubically: total(L) = 25*(L-1)L(2L-1)/6, the sum-of-squares formula
+// (always an exact integer). The v3 triangular curve let one stream produce
+// three level-10s and a level-20; this one targets ~level 2-3 after an hour
+// of steady chatting, while high levels stay a long grind rather than a hard
+// wall. See DESIGN.md §3.
+func totalExpForLevel(level int) int64 {
+	if level < 2 {
+		return 0
 	}
-	l := (5.0 + math.Sqrt(25.0+20.0*float64(exp))) / 10.0
-	level := int(math.Floor(l + 1e-9)) // epsilon guards float error landing just under an exact threshold
-	if level < 1 {
-		level = 1
+	l := int64(level)
+	return levelCostBase * ((l - 1) * l * (2*l - 1) / 6)
+}
+
+// levelForExp inverts totalExpForLevel by walking the curve — thresholds grow
+// cubically, so the loop is short and there are no float edge cases to guard.
+func levelForExp(exp int64) int {
+	level := 1
+	for totalExpForLevel(level+1) <= exp {
+		level++
 	}
 	return level
 }
@@ -558,12 +579,12 @@ func (s *characterStore) save(ctx context.Context, c *character) error {
 func (s *botCommandStore) init(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 	CREATE TABLE IF NOT EXISTS bot_commands (
-	` + "`trigger`" + `      VARCHAR(64)  NOT NULL,
+	`+"`trigger`"+`      VARCHAR(64)  NOT NULL,
 	response     TEXT         NOT NULL,
 	created_by   VARCHAR(64)  NOT NULL,
 	created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-	PRIMARY KEY (` + "`trigger`" + `)
+	PRIMARY KEY (`+"`trigger`"+`)
 	)`)
 	if err != nil {
 		return err
@@ -1238,14 +1259,14 @@ func main() {
 
 func loadConfig() config {
 	return config{
-		rabbitURL:      env("RABBITMQ_URL", "amqp://guest:guest@twitch_broadcaster:5672/"),
-		rabbitExchange: env("RABBITMQ_EXCHANGE", "twitch_events"),
+		rabbitURL:       env("RABBITMQ_URL", "amqp://guest:guest@twitch_broadcaster:5672/"),
+		rabbitExchange:  env("RABBITMQ_EXCHANGE", "twitch_events"),
 		commandExchange: env("RABBITMQ_COMMAND_EXCHANGE", "twitch_commands"),
-		queueName:      env("OVERLAY_QUEUE", "overlay_chat"),
-		httpPort:       env("OVERLAY_HTTP_PORT", "8080"),
-		staticDir:      env("OVERLAY_STATIC_DIR", "./overlay"),
-		mysqlDSN:		env("MYSQL_DSN", "echoes:echoespw@tcp(mysql:3306)/echoes?parseTime=true"),
-		ttsServiceURL:  env("TTS_SERVICE_URL", "http://tts_service:8081"),
+		queueName:       env("OVERLAY_QUEUE", "overlay_chat"),
+		httpPort:        env("OVERLAY_HTTP_PORT", "8080"),
+		staticDir:       env("OVERLAY_STATIC_DIR", "./overlay"),
+		mysqlDSN:        env("MYSQL_DSN", "echoes:echoespw@tcp(mysql:3306)/echoes?parseTime=true"),
+		ttsServiceURL:   env("TTS_SERVICE_URL", "http://tts_service:8081"),
 	}
 }
 
@@ -1527,6 +1548,10 @@ func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub,
 	trackTavernPresence(ctx, event, characters, party, tavern)
 	speakPartyMessage(event, messageText, party, tts)
 
+	if lower == "!roll" || strings.HasPrefix(lower, "!roll ") {
+		handleRollCommand(ctx, event, messageText, characters, party, commands)
+	}
+
 	if isAuthorizedForOther(event) {
 		handleDMCommand(ctx, event, lower, messageText, other, characters, party, commands, tavern)
 		if strings.HasPrefix(lower, "!other ") {
@@ -1657,7 +1682,7 @@ func grantMessageExp(ctx context.Context, event map[string]any, characters *char
 		c = live
 	}
 
-	c.applyExp(int64(10 + c.Logins/10))
+	c.applyExp(expPerMessage(c.Logins))
 
 	if err := characters.save(opCtx, c); err != nil {
 		log.Printf("exp-on-message: failed to save character for %s: %v", userLogin, err)
@@ -1688,9 +1713,96 @@ func killCharacter(ctx context.Context, c *character, party *partyManager, chara
 	}
 }
 
+// handleRollCommand shows a d20 roll (1d20 + level, design doc §7a) for any
+// chatter — DM-only until the 2026-07-13 playtest; a roll changes no state,
+// so there's nothing to protect. Bare `!roll` rolls for the sender's own
+// character (created on the spot if they somehow don't have one yet);
+// `!roll <name>` rolls for a named character and errors if none exists.
+func handleRollCommand(ctx context.Context, event map[string]any, messageText string, characters *characterStore, party *partyManager, commands *commandPublisher) {
+	broadcasterID := firstString(event["broadcaster_user_id"], "")
+	reply := func(format string, args ...any) {
+		if broadcasterID == "" {
+			return
+		}
+		opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_ = commands.publish(opCtx, "channel.command.send_chat", map[string]any{
+			"channel_id": broadcasterID,
+			"message":    fmt.Sprintf(format, args...),
+		})
+	}
+
+	fields := strings.Fields(messageText)
+	if len(fields) > 2 {
+		reply("usage: !roll [name]")
+		return
+	}
+
+	var c *character
+	if len(fields) == 2 {
+		name := trimName(fields[1])
+		if live := party.findInParty(name); live != nil {
+			c = live
+		} else {
+			opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			loaded, err := characters.getByName(opCtx, name)
+			if err != nil || loaded == nil {
+				reply("!roll: no character named %s", name)
+				return
+			}
+			c = loaded
+		}
+	} else {
+		userID := firstString(event["chatter_user_id"], "")
+		userLogin := firstString(event["chatter_user_login"], event["chatter_user_name"], userID)
+		if userID == "" {
+			return
+		}
+		opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		loaded, err := characters.getOrCreate(opCtx, userID, userLogin)
+		if err != nil {
+			log.Printf("!roll: failed to load character for %s: %v", userLogin, err)
+			return
+		}
+		c = loaded
+		if live := party.findInParty(c.Name); live != nil {
+			c = live
+		}
+	}
+
+	roll := rand.Intn(20) + 1
+	total := roll + c.Level
+	crit := ""
+	switch roll {
+	case 20:
+		crit = "nat20"
+	case 1:
+		crit = "nat1"
+	}
+	broadcastJSON(party.hub, map[string]any{
+		"type":  "roll.result",
+		"name":  c.Name,
+		"roll":  roll,
+		"level": c.Level,
+		"total": total,
+		"crit":  crit,
+	})
+	switch crit {
+	case "nat20":
+		reply("🎲 %s rolls a NATURAL 20! %d + %d = %d", c.Name, roll, c.Level, total)
+	case "nat1":
+		reply("🎲 %s rolls a natural 1... %d + %d = %d", c.Name, roll, c.Level, total)
+	default:
+		reply("🎲 %s rolls %d + %d = %d", c.Name, roll, c.Level, total)
+	}
+}
+
 // handleDMCommand parses and executes the broadcaster/mod-only party
 // commands from design doc §6 (minus !extend and !season, both dropped: no
-// possession timer exists to extend, and the campaign table was cut). No-ops
+// possession timer exists to extend, and the campaign table was cut; !roll
+// lives in handleRollCommand now that any chatter can use it). No-ops
 // for anything that isn't one of these prefixes — the caller still runs the
 // pre-existing !other/!fire/#a/#d chain afterward.
 func handleDMCommand(ctx context.Context, event map[string]any, lower, messageText string, other *otherManager, characters *characterStore, party *partyManager, commands *commandPublisher, tavern *tavernManager) {
@@ -1854,42 +1966,6 @@ func handleDMCommand(ctx context.Context, event map[string]any, lower, messageTe
 		persist(c)
 		reply("✨ %s rises again at level %d (%d/%d hp)", c.Name, c.Level, c.HP, c.MaxHP)
 
-	case strings.HasPrefix(lower, "!roll "):
-		if len(fields) != 2 {
-			reply("usage: !roll <name>")
-			return
-		}
-		c, err := resolveForEdit(fields[1])
-		if err != nil || c == nil {
-			reply("!roll: no character named %s", fields[1])
-			return
-		}
-		roll := rand.Intn(20) + 1
-		total := roll + c.Level
-		crit := ""
-		switch roll {
-		case 20:
-			crit = "nat20"
-		case 1:
-			crit = "nat1"
-		}
-		broadcastJSON(party.hub, map[string]any{
-			"type":  "roll.result",
-			"name":  c.Name,
-			"roll":  roll,
-			"level": c.Level,
-			"total": total,
-			"crit":  crit,
-		})
-		switch crit {
-		case "nat20":
-			reply("🎲 %s rolls a NATURAL 20! %d + %d = %d", c.Name, roll, c.Level, total)
-		case "nat1":
-			reply("🎲 %s rolls a natural 1... %d + %d = %d", c.Name, roll, c.Level, total)
-		default:
-			reply("🎲 %s rolls %d + %d = %d", c.Name, roll, c.Level, total)
-		}
-
 	case strings.HasPrefix(lower, "!give "):
 		if len(fields) != 3 {
 			reply("usage: !give <name> <amount|cosmetic>")
@@ -2019,10 +2095,10 @@ func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherMa
 			log.Print("daily login bonus redemption missing user_id")
 			return
 		}
-		
+
 		opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		
+
 		count, err := store.increment(opCtx, userID, userLogin)
 		if err != nil {
 			log.Printf("failed to increment login count for %s: %v", userID, err)
