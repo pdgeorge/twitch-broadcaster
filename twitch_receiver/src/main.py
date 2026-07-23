@@ -93,11 +93,19 @@ class RabbitPublisher:
         self.exchange: aio_pika.Exchange | None = None
 
     async def connect(self) -> None:
-        LOGGER.info("Connecting to RabbitMQ at %s", self.url)
-        self.connection = await aio_pika.connect_robust(self.url)
-        self.channel = await self.connection.channel()
-        self.exchange = await self.channel.declare_exchange(self.exchange_name, aio_pika.ExchangeType.FANOUT, durable=True)
-        LOGGER.info("RabbitMQ ready: exchange=%s", self.exchange_name)
+        backoff_gen = backoff.expo(base=2, factor=0.5, max_value=60)
+        while True:
+            try:
+                LOGGER.info("Connecting to RabbitMQ at %s", self.url)
+                self.connection = await aio_pika.connect_robust(self.url)
+                self.channel = await self.connection.channel()
+                self.exchange = await self.channel.declare_exchange(self.exchange_name, aio_pika.ExchangeType.FANOUT, durable=True)
+                LOGGER.info("RabbitMQ ready: exchange=%s", self.exchange_name)
+                return
+            except Exception as exc:
+                delay = next(backoff_gen)
+                LOGGER.error("Failed to connect to RabbitMQ: %s. Retrying in %.1fs", exc, delay)
+                await asyncio.sleep(delay)
 
     async def publish(self, event_type: str, payload: Dict[str, Any]) -> None:
         if not self.exchange:
@@ -119,14 +127,22 @@ class RabbitCommandConsumer:
         self.queue: aio_pika.Queue | None = None
 
     async def connect(self) -> None:
-        LOGGER.info("Connecting command consumer to RabbitMQ at %s", self.url)
-        self.connection = await aio_pika.connect_robust(self.url)
-        self.channel = await self.connection.channel()
-        await self.channel.set_qos(prefetch_count=10)
-        self.exchange = await self.channel.declare_exchange(self.exchange_name, aio_pika.ExchangeType.FANOUT, durable=True)
-        self.queue = await self.channel.declare_queue(self.queue_name, durable=True)
-        await self.queue.bind(self.exchange, routing_key="")
-        LOGGER.info("Command consumer ready: exchange=%s queue=%s", self.exchange_name, self.queue_name)
+        backoff_gen = backoff.expo(base=2, factor=0.5, max_value=60)
+        while True:
+            try:
+                LOGGER.info("Connecting command consumer to RabbitMQ at %s", self.url)
+                self.connection = await aio_pika.connect_robust(self.url)
+                self.channel = await self.connection.channel()
+                await self.channel.set_qos(prefetch_count=10)
+                self.exchange = await self.channel.declare_exchange(self.exchange_name, aio_pika.ExchangeType.FANOUT, durable=True)
+                self.queue = await self.channel.declare_queue(self.queue_name, durable=True)
+                await self.queue.bind(self.exchange, routing_key="")
+                LOGGER.info("Command consumer ready: exchange=%s queue=%s", self.exchange_name, self.queue_name)
+                return
+            except Exception as exc:
+                delay = next(backoff_gen)
+                LOGGER.error("Failed to connect command consumer to RabbitMQ: %s. Retrying in %.1fs", exc, delay)
+                await asyncio.sleep(delay)
 
     async def consume(self, handler) -> None:
         if not self.queue:

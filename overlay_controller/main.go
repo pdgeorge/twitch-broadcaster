@@ -1278,28 +1278,51 @@ func env(key, fallback string) string {
 }
 
 func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager) error {
+	const minBackoff = 2 * time.Second
+	const maxBackoff = 60 * time.Second
+	backoff := minBackoff
+
+	// wait pauses for the current backoff and doubles it (capped) for the next failure.
+	// Returns ctx.Err() if ctx is cancelled while waiting.
+	wait := func() error {
+		select {
+		case <-time.After(backoff):
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
 	for {
 		conn, err := amqp.Dial(cfg.rabbitURL)
 		if err != nil {
 			log.Printf("failed to connect to rabbitmq: %v", err)
-			select {
-			case <-time.After(5 * time.Second):
-				continue
-			case <-ctx.Done():
-				return ctx.Err()
+			if werr := wait(); werr != nil {
+				return werr
 			}
+			continue
 		}
 
 		ch, err := conn.Channel()
 		if err != nil {
 			conn.Close()
 			log.Printf("failed to open channel: %v", err)
+			if werr := wait(); werr != nil {
+				return werr
+			}
 			continue
 		}
 
 		if err := ch.ExchangeDeclare(cfg.rabbitExchange, "fanout", true, false, false, false, nil); err != nil {
 			log.Printf("failed to declare exchange: %v", err)
 			conn.Close()
+			if werr := wait(); werr != nil {
+				return werr
+			}
 			continue
 		}
 
@@ -1307,12 +1330,18 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 		if err != nil {
 			log.Printf("failed to declare queue: %v", err)
 			conn.Close()
+			if werr := wait(); werr != nil {
+				return werr
+			}
 			continue
 		}
 
 		if err := ch.QueueBind(queue.Name, "", cfg.rabbitExchange, false, nil); err != nil {
 			log.Printf("failed to bind queue: %v", err)
 			conn.Close()
+			if werr := wait(); werr != nil {
+				return werr
+			}
 			continue
 		}
 
@@ -1320,8 +1349,13 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 		if err != nil {
 			log.Printf("failed to register consumer: %v", err)
 			conn.Close()
+			if werr := wait(); werr != nil {
+				return werr
+			}
 			continue
 		}
+
+		backoff = minBackoff // fully connected and consuming — reset the easing
 
 		log.Print("overlay_controller consuming chat messages from RabbitMQ")
 		reconnect := make(chan struct{})
