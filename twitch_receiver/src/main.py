@@ -2,9 +2,10 @@ import asyncio
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterator, List
 
 import aiohttp
 import aio_pika
@@ -20,6 +21,17 @@ TWITCH_EVENTSUB_WS = "wss://eventsub.wss.twitch.tv/ws"
 TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 TWITCH_EVENTSUB_URL = "https://api.twitch.tv/helix/eventsub/subscriptions"
 TWITCH_CHAT_MESSAGES_URL = "https://api.twitch.tv/helix/chat/messages"
+
+# A socket must stay up this long before its drop counts as a fresh failure
+STABLE_CONNECTION_SECONDS = 60
+
+
+def new_backoff() -> Iterator[float]:
+    # backoff>=2 wait generators yield None first (they're primed for .send()),
+    # which made asyncio.sleep(None) raise and kill the process
+    gen = backoff.expo(base=2, factor=0.5, max_value=60)
+    next(gen)
+    return gen
 
 
 @dataclass
@@ -93,7 +105,7 @@ class RabbitPublisher:
         self.exchange: aio_pika.Exchange | None = None
 
     async def connect(self) -> None:
-        backoff_gen = backoff.expo(base=2, factor=0.5, max_value=60)
+        backoff_gen = new_backoff()
         while True:
             try:
                 LOGGER.info("Connecting to RabbitMQ at %s", self.url)
@@ -127,7 +139,7 @@ class RabbitCommandConsumer:
         self.queue: aio_pika.Queue | None = None
 
     async def connect(self) -> None:
-        backoff_gen = backoff.expo(base=2, factor=0.5, max_value=60)
+        backoff_gen = new_backoff()
         while True:
             try:
                 LOGGER.info("Connecting command consumer to RabbitMQ at %s", self.url)
@@ -286,17 +298,17 @@ class TwitchEventSubClient:
         return reconnect_url
 
     async def listen(self) -> None:
-        backoff_gen = backoff.expo(base=2, factor=0.5, max_value=60)
+        backoff_gen = new_backoff()
         reconnect_url: str | None = None
         while True:
+            connected_at: float | None = None
             try:
                 session = await self._ensure_session()
                 url = reconnect_url or TWITCH_EVENTSUB_WS
                 async with session.ws_connect(url, heartbeat=20) as ws:
                     LOGGER.info("Connected to Twitch EventSub socket")
+                    connected_at = time.monotonic()
                     reconnect_url = None
-                    # Connected — reset the backoff so the next failure starts small again
-                    backoff_gen = backoff.expo(base=2, factor=0.5, max_value=60)
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             data = json.loads(msg.data)
@@ -313,10 +325,34 @@ class TwitchEventSubClient:
                         elif msg.type == aiohttp.WSMsgType.ERROR:
                             LOGGER.error("WebSocket error: %s", msg.data)
                             break
+                if reconnect_url:
+                    # Twitch-requested move; the new URL expires quickly, so don't wait
+                    continue
+                problem = f"closed (code={ws.close_code})"
             except Exception as exc:
-                delay = next(backoff_gen)
-                LOGGER.error("WebSocket loop error: %s. Reconnecting in %.1fs", exc, delay)
-                await asyncio.sleep(delay)
+                # A reconnect URL that failed once is likely stale; start over from the default
+                reconnect_url = None
+                problem = f"loop error: {exc}"
+            # Only reset after a connection that actually held. Resetting on connect meant a
+            # server that accepts then drops us got reconnected to almost immediately, forever.
+            if connected_at is not None and time.monotonic() - connected_at >= STABLE_CONNECTION_SECONDS:
+                backoff_gen = new_backoff()
+            delay = next(backoff_gen)
+            LOGGER.error("WebSocket %s. Reconnecting in %.1fs", problem, delay)
+            await asyncio.sleep(delay)
+
+
+async def initial_token_refresh(manager: TokenManager, session: aiohttp.ClientSession) -> None:
+    # Letting this raise crash-looped the container every ~17s for a whole network outage
+    backoff_gen = new_backoff()
+    while True:
+        try:
+            await manager.refresh(session)
+            return
+        except Exception as exc:
+            delay = next(backoff_gen)
+            LOGGER.error("Initial token refresh failed: %s. Retrying in %.1fs", exc, delay)
+            await asyncio.sleep(delay)
 
 
 async def schedule_token_refresh(manager: TokenManager, session: aiohttp.ClientSession) -> None:
@@ -362,7 +398,7 @@ def main() -> None:
 
     async def runner() -> None:
         async with aiohttp.ClientSession() as session:
-            await manager.refresh(session)
+            await initial_token_refresh(manager, session)
             asyncio.create_task(schedule_token_refresh(manager, session))
             await publisher.connect()
             await command_consumer.connect()
