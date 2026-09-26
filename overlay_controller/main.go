@@ -79,6 +79,10 @@ type botCommandStore struct {
 	commands map[string]string // trigger (lowercase) -> response
 }
 
+type chatLogStore struct {
+	db *sql.DB
+}
+
 type commandPublisher struct {
 	url      string
 	exchange string
@@ -90,6 +94,7 @@ const dailyLoginRewardTitle = "daily login bonus"
 const joinPartyRewardTitle = "join the party"
 const partyMaxSize = 4
 const expCooldownDuration = 45 * time.Second
+const chatClearWindow = 24 * time.Hour
 
 func newOverlayHub() *overlayHub {
 	return &overlayHub{
@@ -148,6 +153,10 @@ func newBotCommandStore(db *sql.DB) *botCommandStore {
 		db:       db,
 		commands: make(map[string]string),
 	}
+}
+
+func newChatLogStore(db *sql.DB) *chatLogStore {
+	return &chatLogStore{db: db}
 }
 
 func newCommandPublisher(cfg config) *commandPublisher {
@@ -664,6 +673,88 @@ func (s *botCommandStore) lookup(trigger string) (string, bool) {
 	defer s.mu.RUnlock()
 	resp, ok := s.commands[trigger]
 	return resp, ok
+}
+
+func (s *chatLogStore) init(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+	CREATE TABLE IF NOT EXISTS chat_log (
+	id          BIGINT       NOT NULL AUTO_INCREMENT,
+	message_id  VARCHAR(64)  NOT NULL,
+	user_id     BIGINT       NOT NULL,
+	user_login  VARCHAR(64)  NOT NULL,
+	user_name   VARCHAR(64)  NOT NULL,
+	message     TEXT         NOT NULL,
+	deleted     BOOL         NOT NULL DEFAULT FALSE,
+	created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (id),
+	UNIQUE KEY uq_chat_log_message_id (message_id),
+	INDEX idx_chat_log_user (user_id, created_at)
+	)`)
+	return err
+}
+
+// insert records one chat message. INSERT IGNORE on message_id makes
+// RabbitMQ redeliveries harmless.
+func (s *chatLogStore) insert(ctx context.Context, event map[string]any) error {
+	messageID := firstString(event["message_id"])
+	if messageID == "" {
+		return fmt.Errorf("event has no message_id")
+	}
+	userID, err := strconv.ParseInt(firstString(event["chatter_user_id"]), 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid chatter_user_id: %w", err)
+	}
+	login := firstString(event["chatter_user_login"])
+	name := firstString(event["chatter_user_name"], login)
+
+	_, err = s.db.ExecContext(ctx, `
+	INSERT IGNORE INTO chat_log (message_id, user_id, user_login, user_name, message)
+	VALUES (?, ?, ?, ?, ?)
+	`, messageID, userID, login, name, messageTextFromEvent(event))
+	return err
+}
+
+// markDeleted flags a single message a mod deleted. The row is kept — they
+// did send it — but readers should hide deleted rows by default.
+func (s *chatLogStore) markDeleted(ctx context.Context, messageID string) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE chat_log SET deleted = TRUE WHERE message_id = ?", messageID)
+	return err
+}
+
+// markUserCleared flags a user's recent messages after a timeout or ban wiped
+// them from chat. Twitch only clears what's still on screen, so this is
+// limited to chatClearWindow rather than the user's whole history.
+func (s *chatLogStore) markUserCleared(ctx context.Context, userID string) error {
+	id, err := strconv.ParseInt(userID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid userID %q: %w", userID, err)
+	}
+	_, err = s.db.ExecContext(ctx, `
+	UPDATE chat_log SET deleted = TRUE
+	WHERE user_id = ? AND created_at >= NOW() - INTERVAL ? SECOND
+	`, id, int(chatClearWindow.Seconds()))
+	return err
+}
+
+func handleChatLogEvent(ctx context.Context, eventType string, event map[string]any, chatLog *chatLogStore) {
+	if event == nil {
+		return
+	}
+	opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var err error
+	switch eventType {
+	case "channel.chat.message":
+		err = chatLog.insert(opCtx, event)
+	case "channel.chat.message_delete":
+		err = chatLog.markDeleted(opCtx, firstString(event["message_id"]))
+	case "channel.chat.clear_user_messages":
+		err = chatLog.markUserCleared(opCtx, firstString(event["target_user_id"]))
+	}
+	if err != nil {
+		log.Printf("chat_log: %s failed: %v", eventType, err)
+	}
 }
 
 func (h *overlayHub) handleWS(w http.ResponseWriter, r *http.Request) {
@@ -1218,6 +1309,11 @@ func main() {
 		log.Fatalf("failed to prepare bot_commands schema: %v", err)
 	}
 
+	chatLog := newChatLogStore(db)
+	if err := chatLog.init(ctx); err != nil {
+		log.Fatalf("failed to prepare chat_log schema: %v", err)
+	}
+
 	commandPublisher := newCommandPublisher(cfg)
 	defer commandPublisher.close()
 
@@ -1231,7 +1327,7 @@ func main() {
 	go startPongTicker(ctx, other)
 	go tavern.run(ctx)
 	go func() {
-		if err := consumeChat(ctx, cfg, hub, other, store, characters, party, expCooldown, botCommands, commandPublisher, tts, tavern); err != nil {
+		if err := consumeChat(ctx, cfg, hub, other, store, characters, party, expCooldown, botCommands, chatLog, commandPublisher, tts, tavern); err != nil {
 			log.Fatalf("rabbitmq consumer stopped: %v", err)
 		}
 	}()
@@ -1277,7 +1373,7 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager) error {
+func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, chatLog *chatLogStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager) error {
 	const minBackoff = 2 * time.Second
 	const maxBackoff = 60 * time.Second
 	backoff := minBackoff
@@ -1375,7 +1471,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 					consumeLoop = false
 					break
 				}
-				handleDelivery(ctx, d, hub, other, store, characters, party, expCooldown, botCommands, commands, tts, tavern)
+				handleDelivery(ctx, d, hub, other, store, characters, party, expCooldown, botCommands, chatLog, commands, tts, tavern)
 			case <-reconnect:
 				consumeLoop = false
 			case <-ctx.Done():
@@ -1393,7 +1489,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 	}
 }
 
-func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager) {
+func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, chatLog *chatLogStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager) {
 	defer d.Ack(false)
 
 	var payload eventPayload
@@ -1409,7 +1505,10 @@ func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other
 
 	switch eventType {
 	case "channel.chat.message":
+		handleChatLogEvent(ctx, eventType, payload.Event, chatLog)
 		handleChatEvent(ctx, payload.Event, hub, other, characters, party, expCooldown, botCommands, commands, tts, tavern)
+	case "channel.chat.message_delete", "channel.chat.clear_user_messages":
+		handleChatLogEvent(ctx, eventType, payload.Event, chatLog)
 	case "channel.channel_points_custom_reward_redemption.add":
 		handleRedeemEvent(ctx, payload.Event, other, store, characters, party, commands, tavern)
 	default:
