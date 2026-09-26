@@ -76,6 +76,7 @@ An overlay controller service streams `channel.chat.message` events to browser c
 - The Go backend lives in `overlay_controller/` and listens on `OVERLAY_HTTP_PORT` (default `8080`). The overlay is served at `/` and the WebSocket endpoint is `/ws/overlay`.
 - When running via Docker Compose, the overlay is available at `http://localhost:${OVERLAY_HTTP_PORT}`. Add this URL as a browser source in OBS with a transparent background.
 - Twitch emotes are expanded server-side; the overlay page also auto-loads BTTV/FFZ/7TV global + channel emotes for richer chat rendering.
+- Every chat message is also saved to the `chat_log` MySQL table. Messages a mod deletes, or that a timeout/ban clears, are kept but flagged `deleted = TRUE`.
 - Environment variables for the overlay controller: `RABBITMQ_URL`, `RABBITMQ_EXCHANGE`, `OVERLAY_QUEUE`, `OVERLAY_HTTP_PORT`, `OVERLAY_STATIC_DIR`.
 
 ### Overlay geometry (1920×1080 canvas, all set in `overlay/overlay.css`)

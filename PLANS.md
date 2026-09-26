@@ -12,20 +12,11 @@ Dropped: the "Tavern Chronicler" (AI bard writing campaign history from screensh
 
 **Status: committed to, high priority. Chat logging is the prerequisite and has standalone value; the trial is the payoff.**
 
-### Part 1 — log all chat messages
+### Part 1 — log all chat messages ✅ done
 
-Twitch explicitly permits (encourages) broadcasters logging their own channel's chat. New MySQL table, written by `overlay_controller` — it already parses every `channel.chat.message` and owns MySQL, so this is one INSERT in `handleChatEvent`, no new service:
+Twitch explicitly permits (encourages) broadcasters logging their own channel's chat. `overlay_controller` writes every `channel.chat.message` to the `chat_log` MySQL table (`chatLogStore` in `main.go`) — every message, commands and bots included; filter at read time. Columns: `message_id` (Twitch's id, unique so redeliveries are ignored), `user_id`, `user_login`, `user_name`, `message`, `deleted`, `created_at`.
 
-```sql
-CREATE TABLE chat_log (
-  id BIGINT AUTO_INCREMENT PRIMARY KEY,
-  user_id BIGINT NOT NULL,
-  user_login VARCHAR(64) NOT NULL,
-  message TEXT NOT NULL,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  INDEX (user_id, created_at)
-);
-```
+Moderated messages are never removed — they did send them. Instead `deleted` is flipped to TRUE when a mod deletes a message (`channel.chat.message_delete`) or a timeout/ban clears a user's messages (`channel.chat.clear_user_messages`, which flags that user's last 24h). Anything that shows chat history on screen should hide `deleted` rows by default.
 
 Keep it lean: text only, no fragments/emote metadata (re-derivable if ever needed). At hobby scale this is tiny; keep forever. Courtesy rules: honor "delete my data" requests, and consider purging rows for banned bots. Standalone value even before the trial: grep-able chat history, data for the Tavern Keeper and personality systems below.
 
