@@ -389,12 +389,18 @@
     return `${user}${bodyHTML}`.trim();
   }
 
+  // Third-party emote APIs can hang (no fetch timeout), so never let them
+  // hold up the overlay: give up waiting after a few seconds.
+  function withTimeout(promise, ms) {
+    return Promise.race([promise, new Promise((resolve) => setTimeout(resolve, ms))]);
+  }
+
   async function ensureChannelEmotes(channelId) {
-    await Promise.all([
+    await withTimeout(Promise.all([
       loadBTTVChannel(channelId),
       loadFFZChannel(channelId),
       loadSevenTVChannel(channelId),
-    ]);
+    ]), 3000);
   }
 
   function connect() {
@@ -467,5 +473,6 @@
     });
   }
 
-  loadGlobalEmotes().finally(connect);
+  connect();
+  loadGlobalEmotes();
 })();
