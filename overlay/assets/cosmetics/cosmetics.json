@@ -1,0 +1,8 @@
+{
+  "slots": ["torso"],
+  "items": {
+    "shirtA": { "slot": "torso", "src": "assets/cosmetics/shirtA.png" },
+    "shirtB": { "slot": "torso", "src": "assets/cosmetics/shirtB.png" },
+    "shirtC": { "slot": "torso", "src": "assets/cosmetics/shirtC.png" }
+  }
+}

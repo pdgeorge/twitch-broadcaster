@@ -11,11 +11,15 @@ import (
 	"html"
 	"io"
 	"log"
+	"maps"
 	"math"
 	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -286,7 +290,8 @@ type character struct {
 	MaxHP     int
 	Alive     bool
 	Money     int64
-	Cosmetics []string
+	Cosmetics []string          // everything owned, in the order granted
+	Equipped  map[string]string // slot -> cosmetic id currently worn
 }
 
 // expMessageBase is the flat exp every chatter earns per cooldown-gated
@@ -355,12 +360,244 @@ func (c *character) applyExp(delta int64) {
 	}
 }
 
-// spriteVariant is the deterministic tavern-sprite tint index used until a
-// chatter has explicit cosmetics: hash(username) % 9.
+// spriteVariant is the deterministic tint index for the base Dabling sprite:
+// hash(username) % 9. Equipped cosmetics are drawn over it, untinted.
 func spriteVariant(name string) int {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(strings.ToLower(name)))
 	return int(h.Sum32() % 9)
+}
+
+// cosmeticItem is one wearable: the slot it occupies and the overlay-relative
+// path of its layer PNG — a transparent image on the same 500x600 canvas as
+// Dabling.png, so it lines up with the body at any scale or facing.
+type cosmeticItem struct {
+	Slot string `json:"slot"`
+	Src  string `json:"src"`
+}
+
+// cosmeticCatalog is every cosmetic that exists, loaded from
+// overlay/assets/cosmetics/cosmetics.json. Slots is the draw order (first is
+// drawn lowest, directly over the body); Items is keyed by the id chat types,
+// matched case-insensitively. A character wears at most one item per slot.
+type cosmeticCatalog struct {
+	Slots []string                `json:"slots"`
+	Items map[string]cosmeticItem `json:"items"`
+}
+
+// parseCosmeticCatalog rejects the whole file on any bad entry, so a broken
+// edit can't half-apply: ids must be typeable as one chat word and unique
+// ignoring case, and every item needs an image and a declared slot.
+func parseCosmeticCatalog(data []byte) (*cosmeticCatalog, error) {
+	var cat cosmeticCatalog
+	if err := json.Unmarshal(data, &cat); err != nil {
+		return nil, err
+	}
+	slots := map[string]bool{}
+	for _, slot := range cat.Slots {
+		if slot == "" || slots[slot] {
+			return nil, fmt.Errorf("slot %q is empty or listed twice", slot)
+		}
+		slots[slot] = true
+	}
+	seen := map[string]string{}
+	for id, item := range cat.Items {
+		if id == "" || len(strings.Fields(id)) != 1 {
+			return nil, fmt.Errorf("cosmetic id %q must be a single word", id)
+		}
+		if other, dup := seen[strings.ToLower(id)]; dup {
+			return nil, fmt.Errorf("cosmetic ids %q and %q only differ by case", id, other)
+		}
+		seen[strings.ToLower(id)] = id
+		if !slots[item.Slot] {
+			return nil, fmt.Errorf("cosmetic %q: slot %q isn't listed in slots", id, item.Slot)
+		}
+		if item.Src == "" {
+			return nil, fmt.Errorf("cosmetic %q has no src", id)
+		}
+	}
+	return &cat, nil
+}
+
+// lookup resolves a chat-typed name to the catalog's own spelling of the id.
+func (cat *cosmeticCatalog) lookup(name string) (string, cosmeticItem, bool) {
+	if item, ok := cat.Items[name]; ok {
+		return name, item, true
+	}
+	for id, item := range cat.Items {
+		if strings.EqualFold(id, name) {
+			return id, item, true
+		}
+	}
+	return "", cosmeticItem{}, false
+}
+
+func (cat *cosmeticCatalog) ids() []string {
+	ids := make([]string, 0, len(cat.Items))
+	for id := range cat.Items {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// layers is what the overlay draws over the base sprite: image paths for the
+// equipped items, in slot draw order. Anything the catalog has since dropped
+// is skipped rather than drawn as a broken image.
+func (cat *cosmeticCatalog) layers(equipped map[string]string) []string {
+	var out []string
+	for _, slot := range cat.Slots {
+		if _, item, ok := cat.lookup(equipped[slot]); ok && item.Slot == slot {
+			out = append(out, item.Src)
+		}
+	}
+	return out
+}
+
+func ownsCosmetic(c *character, id string) bool {
+	return slices.ContainsFunc(c.Cosmetics, func(owned string) bool { return strings.EqualFold(owned, id) })
+}
+
+// give adds a catalog item to c's wardrobe, and wears it straight away if
+// that slot is empty so a first shirt shows up without an !equip.
+func (cat *cosmeticCatalog) give(c *character, name string) (id string, equipped bool, err error) {
+	id, item, ok := cat.lookup(name)
+	if !ok {
+		return "", false, fmt.Errorf("no cosmetic called %s (have: %s)", name, strings.Join(cat.ids(), ", "))
+	}
+	if ownsCosmetic(c, id) {
+		return id, false, fmt.Errorf("%s already owns %s", c.Name, id)
+	}
+	c.Cosmetics = append(c.Cosmetics, id)
+	if _, worn, ok := cat.lookup(c.Equipped[item.Slot]); ok && worn.Slot == item.Slot {
+		return id, false, nil
+	}
+	if c.Equipped == nil {
+		c.Equipped = map[string]string{}
+	}
+	c.Equipped[item.Slot] = id
+	return id, true, nil
+}
+
+// equip wears an owned item, replacing whatever was in its slot.
+func (cat *cosmeticCatalog) equip(c *character, name string) (string, error) {
+	id, item, ok := cat.lookup(name)
+	if !ok {
+		return "", fmt.Errorf("there's no cosmetic called %s", name)
+	}
+	if !ownsCosmetic(c, id) {
+		return "", fmt.Errorf("you don't own %s", id)
+	}
+	if c.Equipped == nil {
+		c.Equipped = map[string]string{}
+	}
+	c.Equipped[item.Slot] = id
+	return id, nil
+}
+
+// unequipCosmetic takes off whatever matches name, which can be either the
+// item's id or its slot.
+func unequipCosmetic(c *character, name string) (string, error) {
+	for slot, id := range c.Equipped {
+		if strings.EqualFold(slot, name) || strings.EqualFold(id, name) {
+			delete(c.Equipped, slot)
+			return id, nil
+		}
+	}
+	return "", fmt.Errorf("you're not wearing %s", name)
+}
+
+// takeCosmetic removes name from c's wardrobe (and body, if worn). It matches
+// the owned list rather than the catalog, so the DM can also clear out ids the
+// catalog doesn't have, like typos from before !give checked the catalog.
+func takeCosmetic(c *character, name string) (string, bool) {
+	i := slices.IndexFunc(c.Cosmetics, func(owned string) bool { return strings.EqualFold(owned, name) })
+	if i < 0 {
+		return "", false
+	}
+	id := c.Cosmetics[i]
+	c.Cosmetics = slices.Delete(c.Cosmetics, i, i+1)
+	if !ownsCosmetic(c, id) {
+		for slot, worn := range c.Equipped {
+			if strings.EqualFold(worn, id) {
+				delete(c.Equipped, slot)
+			}
+		}
+	}
+	return id, true
+}
+
+// wardrobeSummary is the !wardrobe reply: owned items the catalog still has,
+// in the order granted, with what's being worn marked.
+func (cat *cosmeticCatalog) wardrobeSummary(c *character) string {
+	var parts []string
+	seen := map[string]bool{}
+	for _, owned := range c.Cosmetics {
+		id, item, ok := cat.lookup(owned)
+		if !ok || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if strings.EqualFold(c.Equipped[item.Slot], id) {
+			id += " (wearing)"
+		}
+		parts = append(parts, id)
+	}
+	if len(parts) == 0 {
+		return "you don't own any cosmetics yet"
+	}
+	return "your wardrobe: " + strings.Join(parts, ", ")
+}
+
+// cosmeticCatalogStore serves the catalog from disk, re-reading it whenever
+// the file's mtime changes so items can be added mid-stream (drop in a PNG,
+// add a line) without a restart. A broken edit is logged and the last good
+// catalog stays in use.
+type cosmeticCatalogStore struct {
+	path    string
+	mu      sync.Mutex
+	modTime time.Time
+	warned  bool
+	catalog *cosmeticCatalog
+}
+
+func newCosmeticCatalogStore(path string) *cosmeticCatalogStore {
+	return &cosmeticCatalogStore{path: path, catalog: &cosmeticCatalog{}}
+}
+
+// get never returns nil; a nil store (tests) serves an empty catalog.
+func (s *cosmeticCatalogStore) get() *cosmeticCatalog {
+	if s == nil {
+		return &cosmeticCatalog{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	info, err := os.Stat(s.path)
+	if err != nil {
+		if !s.warned {
+			log.Printf("cosmetics: can't read catalog: %v", err)
+			s.warned = true
+		}
+		return s.catalog
+	}
+	s.warned = false
+	if info.ModTime().Equal(s.modTime) {
+		return s.catalog
+	}
+	s.modTime = info.ModTime()
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		log.Printf("cosmetics: can't read catalog: %v", err)
+		return s.catalog
+	}
+	cat, err := parseCosmeticCatalog(data)
+	if err != nil {
+		log.Printf("cosmetics: ignoring bad catalog %s, keeping the last good one: %v", s.path, err)
+		return s.catalog
+	}
+	s.catalog = cat
+	log.Printf("cosmetics: loaded %d items from %s", len(cat.Items), s.path)
+	return s.catalog
 }
 
 // ttsVoiceTiers gate the voice pool by login count (design doc §9): everyone
@@ -507,6 +744,7 @@ func (s *characterStore) init(ctx context.Context) error {
 		"max_hp INT  NOT NULL DEFAULT 14",
 		"alive  TINYINT(1) NOT NULL DEFAULT 1",
 		"sheet  JSON NULL",
+		"equipped JSON NULL",
 	}
 	for _, col := range columns {
 		if _, err := s.db.ExecContext(ctx, "ALTER TABLE chatters ADD COLUMN "+col); err != nil {
@@ -522,19 +760,22 @@ func (s *characterStore) init(ctx context.Context) error {
 
 func scanCharacter(row *sql.Row) (*character, error) {
 	var c character
-	var cosmeticsJSON sql.NullString
+	var cosmeticsJSON, equippedJSON sql.NullString
 	var alive bool
-	if err := row.Scan(&c.UserID, &c.Name, &c.Logins, &c.Exp, &c.Money, &cosmeticsJSON, &c.Level, &c.HP, &c.MaxHP, &alive); err != nil {
+	if err := row.Scan(&c.UserID, &c.Name, &c.Logins, &c.Exp, &c.Money, &cosmeticsJSON, &equippedJSON, &c.Level, &c.HP, &c.MaxHP, &alive); err != nil {
 		return nil, err
 	}
 	c.Alive = alive
 	if cosmeticsJSON.Valid && cosmeticsJSON.String != "" && cosmeticsJSON.String != "null" {
 		_ = json.Unmarshal([]byte(cosmeticsJSON.String), &c.Cosmetics)
 	}
+	if equippedJSON.Valid && equippedJSON.String != "" && equippedJSON.String != "null" {
+		_ = json.Unmarshal([]byte(equippedJSON.String), &c.Equipped)
+	}
 	return &c, nil
 }
 
-const characterSelectColumns = "twitch_chatter_id, twitch_chatter_name, logins, exp, money, cosmetics, level, hp, max_hp, alive"
+const characterSelectColumns = "twitch_chatter_id, twitch_chatter_name, logins, exp, money, cosmetics, equipped, level, hp, max_hp, alive"
 
 // getOrCreate ensures a chatters row exists for userID, then returns the
 // full character sheet. userLogin is used only to seed/refresh the name.
@@ -578,10 +819,14 @@ func (s *characterStore) save(ctx context.Context, c *character) error {
 	if err != nil {
 		return err
 	}
+	equippedJSON, err := json.Marshal(c.Equipped)
+	if err != nil {
+		return err
+	}
 	_, err = s.db.ExecContext(ctx, `
-	UPDATE chatters SET exp = ?, money = ?, cosmetics = ?, level = ?, hp = ?, max_hp = ?, alive = ?
+	UPDATE chatters SET exp = ?, money = ?, cosmetics = ?, equipped = ?, level = ?, hp = ?, max_hp = ?, alive = ?
 	WHERE twitch_chatter_id = ?
-	`, c.Exp, c.Money, string(cosmeticsJSON), c.Level, c.HP, c.MaxHP, c.Alive, c.UserID)
+	`, c.Exp, c.Money, string(cosmeticsJSON), string(equippedJSON), c.Level, c.HP, c.MaxHP, c.Alive, c.UserID)
 	return err
 }
 
@@ -1024,32 +1269,36 @@ func broadcastJSON(hub *overlayHub, obj any) {
 // Membership only changes on a successful "join the party" redemption or the
 // DM commands !kick / !newparty — there is deliberately no expiry timer.
 type partyManager struct {
-	mu      sync.Mutex
-	hub     *overlayHub
-	members []*character
+	mu        sync.Mutex
+	hub       *overlayHub
+	cosmetics *cosmeticCatalogStore
+	members   []*character
 }
 
-func newPartyManager(hub *overlayHub) *partyManager {
-	return &partyManager{hub: hub}
+func newPartyManager(hub *overlayHub, cosmetics *cosmeticCatalogStore) *partyManager {
+	return &partyManager{hub: hub, cosmetics: cosmetics}
 }
 
 type partyMemberPayload struct {
-	Name    string `json:"name"`
-	Level   int    `json:"level"`
-	HP      int    `json:"hp"`
-	MaxHP   int    `json:"max_hp"`
-	Exp     int64  `json:"exp"`
-	ExpNext int64  `json:"exp_next"`
-	Variant int    `json:"variant"`
-	Status  string `json:"status"`
+	Name    string   `json:"name"`
+	Level   int      `json:"level"`
+	HP      int      `json:"hp"`
+	MaxHP   int      `json:"max_hp"`
+	Exp     int64    `json:"exp"`
+	ExpNext int64    `json:"exp_next"`
+	Variant int      `json:"variant"`
+	Layers  []string `json:"layers"`
+	Status  string   `json:"status"`
 }
 
 func (p *partyManager) broadcastLocked() {
+	catalog := p.cosmetics.get()
 	members := make([]partyMemberPayload, 0, len(p.members))
 	for _, c := range p.members {
 		members = append(members, partyMemberPayload{
 			Name: c.Name, Level: c.Level, HP: c.HP, MaxHP: c.MaxHP,
-			Exp: c.Exp, ExpNext: c.expNext(), Variant: spriteVariant(c.Name), Status: "possessed",
+			Exp: c.Exp, ExpNext: c.expNext(), Variant: spriteVariant(c.Name),
+			Layers: catalog.layers(c.Equipped), Status: "possessed",
 		})
 	}
 	broadcastJSON(p.hub, map[string]any{"type": "party.update", "members": members})
@@ -1150,52 +1399,79 @@ func (p *partyManager) notifyChange() {
 // tavernIdleTimeout; the roster is rebroadcast on every visible change and
 // once per sweep tick so a refreshed browser source self-heals within a minute.
 type tavernManager struct {
-	hub   *overlayHub
-	mu    sync.Mutex
-	dudes map[string]*tavernDude
+	hub       *overlayHub
+	cosmetics *cosmeticCatalogStore
+	mu        sync.Mutex
+	dudes     map[string]*tavernDude
 }
 
 type tavernDude struct {
 	Name     string
 	Level    int
+	Equipped map[string]string
 	LastSeen time.Time
+}
+
+// updateLook copies the parts of c the roster draws (size and outfit),
+// reporting whether anything visible changed.
+func (d *tavernDude) updateLook(c *character) bool {
+	if d.Level == c.Level && maps.Equal(d.Equipped, c.Equipped) {
+		return false
+	}
+	d.Level = c.Level
+	d.Equipped = maps.Clone(c.Equipped)
+	return true
 }
 
 const tavernIdleTimeout = 30 * time.Minute
 
-func newTavernManager(hub *overlayHub) *tavernManager {
-	return &tavernManager{hub: hub, dudes: map[string]*tavernDude{}}
+func newTavernManager(hub *overlayHub, cosmetics *cosmeticCatalogStore) *tavernManager {
+	return &tavernManager{hub: hub, cosmetics: cosmetics, dudes: map[string]*tavernDude{}}
 }
 
 func (t *tavernManager) broadcastLocked() {
 	type dudePayload struct {
-		Name    string `json:"name"`
-		Level   int    `json:"level"`
-		Variant int    `json:"variant"`
+		Name    string   `json:"name"`
+		Level   int      `json:"level"`
+		Variant int      `json:"variant"`
+		Layers  []string `json:"layers"`
 	}
+	catalog := t.cosmetics.get()
 	dudes := make([]dudePayload, 0, len(t.dudes))
 	for _, d := range t.dudes {
-		dudes = append(dudes, dudePayload{Name: d.Name, Level: d.Level, Variant: spriteVariant(d.Name)})
+		dudes = append(dudes, dudePayload{Name: d.Name, Level: d.Level, Variant: spriteVariant(d.Name), Layers: catalog.layers(d.Equipped)})
 	}
 	broadcastJSON(t.hub, map[string]any{"type": "tavern.roster", "dudes": dudes})
 }
 
 // touch refreshes presence, broadcasting only when the roster visibly
-// changes (new dude, or a level change that resizes them).
+// changes (new dude, a level change that resizes them, or a new outfit).
 func (t *tavernManager) touch(c *character) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	key := strings.ToLower(c.Name)
 	if d, ok := t.dudes[key]; ok {
 		d.LastSeen = time.Now()
-		if d.Level == c.Level {
+		if !d.updateLook(c) {
 			return
 		}
-		d.Level = c.Level
 	} else {
-		t.dudes[key] = &tavernDude{Name: c.Name, Level: c.Level, LastSeen: time.Now()}
+		d := &tavernDude{Name: c.Name, LastSeen: time.Now()}
+		d.updateLook(c)
+		t.dudes[key] = d
 	}
 	t.broadcastLocked()
+}
+
+// refresh redraws a dude already on the floor after a DM command or !equip
+// changes them. Unlike touch it doesn't count as presence: editing someone
+// who hasn't chatted lately mustn't summon them into the tavern.
+func (t *tavernManager) refresh(c *character) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if d, ok := t.dudes[strings.ToLower(c.Name)]; ok && d.updateLook(c) {
+		t.broadcastLocked()
+	}
 }
 
 func (t *tavernManager) remove(name string) {
@@ -1317,17 +1593,20 @@ func main() {
 	commandPublisher := newCommandPublisher(cfg)
 	defer commandPublisher.close()
 
+	cosmetics := newCosmeticCatalogStore(filepath.Join(cfg.staticDir, "assets", "cosmetics", "cosmetics.json"))
+	cosmetics.get() // load now so a bad catalog shows up in the startup log
+
 	hub := newOverlayHub()
 	other := newOtherManager(hub)
-	party := newPartyManager(hub)
+	party := newPartyManager(hub, cosmetics)
 	expCooldown := newExpCooldownTracker()
 	tts := newTTSManager(cfg.ttsServiceURL, hub)
-	tavern := newTavernManager(hub)
+	tavern := newTavernManager(hub, cosmetics)
 	go hub.run(ctx)
 	go startPongTicker(ctx, other)
 	go tavern.run(ctx)
 	go func() {
-		if err := consumeChat(ctx, cfg, hub, other, store, characters, party, expCooldown, botCommands, chatLog, commandPublisher, tts, tavern); err != nil {
+		if err := consumeChat(ctx, cfg, hub, other, store, characters, party, expCooldown, botCommands, chatLog, commandPublisher, tts, tavern, cosmetics); err != nil {
 			log.Fatalf("rabbitmq consumer stopped: %v", err)
 		}
 	}()
@@ -1373,7 +1652,7 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, chatLog *chatLogStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager) error {
+func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, chatLog *chatLogStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager, cosmetics *cosmeticCatalogStore) error {
 	const minBackoff = 2 * time.Second
 	const maxBackoff = 60 * time.Second
 	backoff := minBackoff
@@ -1471,7 +1750,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 					consumeLoop = false
 					break
 				}
-				handleDelivery(ctx, d, hub, other, store, characters, party, expCooldown, botCommands, chatLog, commands, tts, tavern)
+				handleDelivery(ctx, d, hub, other, store, characters, party, expCooldown, botCommands, chatLog, commands, tts, tavern, cosmetics)
 			case <-reconnect:
 				consumeLoop = false
 			case <-ctx.Done():
@@ -1489,7 +1768,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 	}
 }
 
-func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, chatLog *chatLogStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager) {
+func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, chatLog *chatLogStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager, cosmetics *cosmeticCatalogStore) {
 	defer d.Ack(false)
 
 	var payload eventPayload
@@ -1506,7 +1785,7 @@ func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other
 	switch eventType {
 	case "channel.chat.message":
 		handleChatLogEvent(ctx, eventType, payload.Event, chatLog)
-		handleChatEvent(ctx, payload.Event, hub, other, characters, party, expCooldown, botCommands, commands, tts, tavern)
+		handleChatEvent(ctx, payload.Event, hub, other, characters, party, expCooldown, botCommands, commands, tts, tavern, cosmetics)
 	case "channel.chat.message_delete", "channel.chat.clear_user_messages":
 		handleChatLogEvent(ctx, eventType, payload.Event, chatLog)
 	case "channel.channel_points_custom_reward_redemption.add":
@@ -1665,7 +1944,7 @@ func normalizeMarkdownInput(input string) string {
 	return normalized
 }
 
-func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub, other *otherManager, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager) {
+func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub, other *otherManager, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager, cosmetics *cosmeticCatalogStore) {
 	if event == nil {
 		return
 	}
@@ -1685,8 +1964,12 @@ func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub,
 		handleRollCommand(ctx, event, messageText, characters, party, commands)
 	}
 
+	if cmd, _, _ := strings.Cut(lower, " "); cmd == "!wardrobe" || cmd == "!equip" || cmd == "!unequip" {
+		handleCosmeticCommand(ctx, event, messageText, characters, party, tavern, cosmetics, commands)
+	}
+
 	if isAuthorizedForOther(event) {
-		handleDMCommand(ctx, event, lower, messageText, other, characters, party, commands, tavern)
+		handleDMCommand(ctx, event, lower, messageText, other, characters, party, commands, tavern, cosmetics)
 		if strings.HasPrefix(lower, "!other ") {
 			content := strings.TrimSpace(messageText[len("!other "):])
 			other.setBase(markdownToHTML(normalizeMarkdownInput(content)))
@@ -1932,13 +2215,87 @@ func handleRollCommand(ctx context.Context, event map[string]any, messageText st
 	}
 }
 
+// handleCosmeticCommand runs the wardrobe commands any chatter can use, always
+// on their own character: !wardrobe lists what they own, !equip <item> wears
+// something they own (replacing whatever was in that slot), and
+// !unequip <item|slot> takes it off. Items are only ever granted by the DM's
+// !give.
+func handleCosmeticCommand(ctx context.Context, event map[string]any, messageText string, characters *characterStore, party *partyManager, tavern *tavernManager, cosmetics *cosmeticCatalogStore, commands *commandPublisher) {
+	userID := firstString(event["chatter_user_id"], "")
+	userLogin := firstString(event["chatter_user_login"], event["chatter_user_name"], userID)
+	if userID == "" {
+		return
+	}
+	broadcasterID := firstString(event["broadcaster_user_id"], "")
+	reply := func(format string, args ...any) {
+		if broadcasterID == "" {
+			return
+		}
+		opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_ = commands.publish(opCtx, "channel.command.send_chat", map[string]any{
+			"channel_id": broadcasterID,
+			"message":    "@" + userLogin + " " + fmt.Sprintf(format, args...),
+		})
+	}
+
+	opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	c, err := characters.getOrCreate(opCtx, userID, userLogin)
+	if err != nil {
+		log.Printf("cosmetics: failed to load character for %s: %v", userLogin, err)
+		return
+	}
+	// A possessed character's live party copy is what the next exp tick
+	// saves, so the change has to land there or it'd be overwritten.
+	if live := party.findInParty(c.Name); live != nil {
+		c = live
+	}
+
+	catalog := cosmetics.get()
+	fields := strings.Fields(messageText)
+	cmd := strings.ToLower(fields[0])
+	if cmd == "!wardrobe" {
+		reply("%s", catalog.wardrobeSummary(c))
+		return
+	}
+	if len(fields) != 2 {
+		reply("usage: %s <item>", cmd)
+		return
+	}
+	var id string
+	if cmd == "!equip" {
+		id, err = catalog.equip(c, fields[1])
+	} else {
+		id, err = unequipCosmetic(c, fields[1])
+	}
+	if err != nil {
+		reply("%v", err)
+		return
+	}
+	if err := characters.save(opCtx, c); err != nil {
+		log.Printf("cosmetics: failed to save %s: %v", c.Name, err)
+		return
+	}
+	if party.findInParty(c.Name) != nil {
+		party.notifyChange()
+	} else {
+		tavern.refresh(c)
+	}
+	if cmd == "!equip" {
+		reply("now wearing %s", id)
+	} else {
+		reply("took off %s", id)
+	}
+}
+
 // handleDMCommand parses and executes the broadcaster/mod-only party
 // commands from design doc §6 (minus !extend and !season, both dropped: no
 // possession timer exists to extend, and the campaign table was cut; !roll
 // lives in handleRollCommand now that any chatter can use it). No-ops
 // for anything that isn't one of these prefixes — the caller still runs the
 // pre-existing !other/!fire/#a/#d chain afterward.
-func handleDMCommand(ctx context.Context, event map[string]any, lower, messageText string, other *otherManager, characters *characterStore, party *partyManager, commands *commandPublisher, tavern *tavernManager) {
+func handleDMCommand(ctx context.Context, event map[string]any, lower, messageText string, other *otherManager, characters *characterStore, party *partyManager, commands *commandPublisher, tavern *tavernManager, cosmetics *cosmeticCatalogStore) {
 	broadcasterID := firstString(event["broadcaster_user_id"], "")
 	reply := func(format string, args ...any) {
 		if broadcasterID == "" {
@@ -1973,6 +2330,8 @@ func handleDMCommand(ctx context.Context, event map[string]any, lower, messageTe
 		}
 		if party.findInParty(c.Name) != nil {
 			party.notifyChange()
+		} else {
+			tavern.refresh(c)
 		}
 	}
 
@@ -2114,10 +2473,36 @@ func handleDMCommand(ctx context.Context, event map[string]any, lower, messageTe
 			persist(c)
 			reply("%s: money now %d", c.Name, c.Money)
 		} else {
-			c.Cosmetics = append(c.Cosmetics, fields[2])
+			id, equipped, err := cosmetics.get().give(c, fields[2])
+			if err != nil {
+				reply("!give: %v", err)
+				return
+			}
 			persist(c)
-			reply("%s: granted cosmetic %q", c.Name, fields[2])
+			if equipped {
+				reply("%s: granted %s and put it on", c.Name, id)
+			} else {
+				reply("%s: granted %s (they can !equip %s to wear it)", c.Name, id, id)
+			}
 		}
+
+	case strings.HasPrefix(lower, "!take "):
+		if len(fields) != 3 {
+			reply("usage: !take <name> <cosmetic>")
+			return
+		}
+		c, err := resolveForEdit(fields[1])
+		if err != nil || c == nil {
+			reply("!take: no character named %s", fields[1])
+			return
+		}
+		id, ok := takeCosmetic(c, fields[2])
+		if !ok {
+			reply("!take: %s doesn't own %s", c.Name, fields[2])
+			return
+		}
+		persist(c)
+		reply("%s: took away %s", c.Name, id)
 
 	case lower == "!newparty":
 		ejected := party.newParty()

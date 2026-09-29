@@ -5,17 +5,36 @@
   let otherBaseHTML = '';
   let pongActive = false;
 
+  // Paper-doll sprite: the tinted base Dabling with one full-canvas PNG per
+  // equipped cosmetic stacked on top (the controller sends them in draw
+  // order). Every layer shares Dabling.png's canvas, so they line up at any
+  // size; cosmetics stay untinted.
+  function fillSprite(container, variant, layers) {
+    container.innerHTML = '';
+    const base = document.createElement('img');
+    base.src = 'assets/Dabling.png';
+    base.alt = '';
+    base.style.filter = `hue-rotate(${(variant || 0) * 40}deg)`;
+    container.appendChild(base);
+    (layers || []).forEach((src) => {
+      const layer = document.createElement('img');
+      layer.className = 'cosmetic-layer';
+      layer.src = src;
+      layer.alt = '';
+      container.appendChild(layer);
+    });
+  }
+
   function renderPartyCards(members) {
     partyCardsBox.innerHTML = '';
     (members || []).forEach((member) => {
       const hpPct = member.max_hp > 0 ? Math.max(0, Math.min(100, (member.hp / member.max_hp) * 100)) : 0;
       const expPct = member.exp_next > 0 ? Math.max(0, Math.min(100, (member.exp / member.exp_next) * 100)) : 0;
-      const hue = (member.variant || 0) * 40;
 
       const card = document.createElement('div');
       card.className = 'party-card';
       card.innerHTML = `
-        <img class="avatar" src="assets/Dabling.png" style="filter: hue-rotate(${hue}deg)" alt="${escapeHTML(member.name || '')}" />
+        <div class="avatar"></div>
         <div class="name">${escapeHTML(member.name || '')}</div>
         <div class="level">Lv ${member.level ?? 1}</div>
         <div class="bar"><div class="bar-fill hp-fill" style="width:${hpPct}%"></div></div>
@@ -23,12 +42,13 @@
         <div class="bar"><div class="bar-fill exp-fill" style="width:${expPct}%"></div></div>
         <div class="bar-label">${member.exp ?? 0}/${member.exp_next ?? 0} exp</div>
       `;
+      fillSprite(card.querySelector('.avatar'), member.variant, member.layers);
       partyCardsBox.appendChild(card);
     });
   }
 
   const tavernArea = document.getElementById('tavern-area');
-  const tavernDudes = new Map(); // lowercase name -> {el, x, wanderTimer}
+  const tavernDudes = new Map(); // lowercase name -> {el, x, look, wanderTimer}
   let partyNames = new Set();
   const DUDE_BASE_HEIGHT = 96;
 
@@ -78,7 +98,7 @@
         const el = document.createElement('div');
         el.className = 'tavern-dude';
         el.innerHTML = `
-          <div class="dude-sprite"><img src="assets/Dabling.png" style="filter: hue-rotate(${(d.variant || 0) * 40}deg)" alt="" /></div>
+          <div class="dude-sprite"><div class="dude-body"></div></div>
           <div class="dude-name">${escapeHTML(d.name || '')}</div>
         `;
         el.style.bottom = `${Math.floor(Math.random() * 14)}px`;
@@ -87,6 +107,13 @@
         el.style.left = `${dude.x}%`;
         tavernDudes.set(key, dude);
         scheduleWander(dude);
+      }
+      // Only rebuild the sprite when the outfit changes, so a roster update
+      // doesn't reload images or restart the bob mid-stride.
+      const look = (d.layers || []).join('|');
+      if (dude.look !== look) {
+        fillSprite(dude.el.querySelector('.dude-body'), d.variant, d.layers);
+        dude.look = look;
       }
       dude.el.style.setProperty('--dude-height', `${Math.round(DUDE_BASE_HEIGHT * dudeScale(d.level))}px`);
     });

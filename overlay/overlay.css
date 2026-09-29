@@ -107,11 +107,18 @@ html, body {
 }
 
 .party-card .avatar {
+  position: relative;
   width: 40px;
   height: 40px;
-  object-fit: contain;
-  display: block;
   margin: 0 auto 4px;
+}
+
+.party-card .avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .party-card .name {
@@ -173,11 +180,26 @@ html, body {
   text-align: center;
 }
 
-.tavern-dude .dude-sprite img {
-  height: var(--dude-height, 96px);
-  display: block;
+/* .dude-sprite takes the left/right flip (an inline transform), .dude-body
+   the bob/waddle animation, so neither overrides the other. The body shrinks
+   to the base image; cosmetic layers are stretched over it exactly. */
+.tavern-dude .dude-body {
+  position: relative;
+  width: fit-content;
   margin: 0 auto;
   animation: dude-bob 2.6s ease-in-out infinite;
+}
+
+.tavern-dude .dude-body img {
+  height: var(--dude-height, 96px);
+  display: block;
+}
+
+.tavern-dude .dude-body .cosmetic-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
 }
 
 .tavern-dude .dude-name {
@@ -190,7 +212,7 @@ html, body {
 
 /* Walking waddle: rocks on the feet while the left transition runs, then the
    .walking class drops off and the idle bob takes back over. */
-.tavern-dude.walking .dude-sprite img {
+.tavern-dude.walking .dude-body {
   transform-origin: 50% 100%;
   animation: dude-waddle 0.45s ease-in-out infinite;
 }
