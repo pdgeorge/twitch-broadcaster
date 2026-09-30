@@ -93,9 +93,20 @@ An overlay controller service streams `channel.chat.message` events to browser c
 - **Channel point reward titled “announcement”**: when redeemed, the lower box shows the submitted text (Markdown supported) for five minutes.
 - **`!fire`** (broadcaster/moderators): clears any active announcement early and restores the last `!other` content.
 
+### Cosmetics (Dabling outfits)
+
+Chatters can own several cosmetics and pick which ones their Dabling wears, one per slot (e.g. one shirt at a time). Worn items show on the tavern floor and on party cards; the Dabling's hue tint still applies to the body, never to the cosmetic.
+
+- **`!give <name> <cosmetic>`** (broadcaster/moderators): grants an item from the catalog (anything else is rejected). If that slot is empty it's worn straight away. `!give <name> <number>` still grants money.
+- **`!take <name> <cosmetic>`** (broadcaster/moderators): removes an item (and takes it off). Also works on old entries the catalog doesn't know.
+- **`!wardrobe`** (any chatter): lists what you own and what you're wearing.
+- **`!equip <cosmetic>`** / **`!unequip <cosmetic or slot>`** (any chatter): change your own outfit.
+
+The catalog is `overlay/assets/cosmetics/cosmetics.json`: `slots` sets the draw order (first is drawn lowest), and each item names its slot and its image. Every image is a transparent PNG on the same 500×600 canvas as `overlay/assets/Dabling.png`, drawn in place over the body, so it lines up at any size. To add one, drop the PNG in `overlay/assets/cosmetics/` and add a line to the catalog. The controller re-reads the file when it changes, so no restart is needed. A broken edit is logged and the previous catalog stays in use. Sprites are mirrored when a Dabling walks left, so any lettering on a cosmetic will read backwards half the time. `shirtA`/`shirtB`/`shirtC` are placeholder art.
+
 ## Tests
 
-The game logic that guards persistent character state (level curve, exp/HP rules, party and tavern membership, DM-command authorization, chat HTML escaping) is covered by `overlay_controller/main_test.go` — run `go test ./...` from `overlay_controller/`. The plumbing (websockets, RabbitMQ, MySQL, the overlay page itself) is deliberately untested: it fails loudly, the math fails silently.
+The game logic that guards persistent character state (level curve, exp/HP rules, party and tavern membership, cosmetic ownership and equip rules, DM-command authorization, chat HTML escaping) is covered by `overlay_controller/main_test.go` — run `go test ./...` from `overlay_controller/`. The plumbing (websockets, RabbitMQ, MySQL, the overlay page itself) is deliberately untested: it fails loudly, the math fails silently.
 
 ## Notes on long-running operation
 
