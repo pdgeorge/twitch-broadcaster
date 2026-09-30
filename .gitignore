@@ -15,6 +15,7 @@ test*
 *.png
 !resources/*.png
 !overlay/assets/*.png
+!overlay/assets/cosmetics/*.png
 
 # Go build artifact (go build in overlay_controller/ drops the binary here)
 overlay_controller/overlay_controller
