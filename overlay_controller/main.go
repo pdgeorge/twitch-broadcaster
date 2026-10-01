@@ -268,18 +268,15 @@ func (s *loginStore) init(ctx context.Context) error {
 	return addChattersColumns(ctx, s.db, "first_logins INT NOT NULL DEFAULT 0")
 }
 
-// increment counts a "daily login bonus" redeem and returns the new total.
-func (s *loginStore) increment(ctx context.Context, userID, userLogin string) (int64, error) {
-	return s.bump(ctx, "logins", userID, userLogin)
-}
+// Counter columns on chatters that loginStore.bump can increment.
+const (
+	loginsCounter      = "logins"       // "daily login bonus" redeems
+	firstLoginsCounter = "first_logins" // "first login bonus" redeems
+)
 
-// incrementFirst counts a "first login bonus" redeem and returns the new total.
-func (s *loginStore) incrementFirst(ctx context.Context, userID, userLogin string) (int64, error) {
-	return s.bump(ctx, "first_logins", userID, userLogin)
-}
-
-// bump adds one to a chatters counter column, creating the row if needed.
-// column only ever comes from increment/incrementFirst, never user input.
+// bump adds one to a chatters counter column, creating the row if needed,
+// and returns the new total. column is always one of the counter constants
+// above, never user input.
 func (s *loginStore) bump(ctx context.Context, column, userID, userLogin string) (int64, error) {
 	// Convert Twitch user id from string -> int64 for BIGINT column
 	id, err := strconv.ParseInt(userID, 10, 64)
@@ -1811,7 +1808,7 @@ func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other
 	case "channel.chat.message_delete", "channel.chat.clear_user_messages":
 		handleChatLogEvent(ctx, eventType, payload.Event, chatLog)
 	case "channel.channel_points_custom_reward_redemption.add":
-		handleRedeemEvent(ctx, payload.Event, other, store, characters, party, commands, tavern)
+		handleRedeemEvent(ctx, payload.Event, other, store, characters, party, commands, tavern, cosmetics)
 	default:
 		return
 	}
@@ -2613,13 +2610,14 @@ func handlePossessionRedeem(ctx context.Context, event map[string]any, character
 	}
 }
 
-func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, commands *commandPublisher, tavern *tavernManager) {
+func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, commands *commandPublisher, tavern *tavernManager, cosmetics *cosmeticCatalogStore) {
 	if event == nil {
 		return
 	}
 
 	reward, _ := event["reward"].(map[string]any)
 	title := strings.TrimSpace(firstString(reward["title"], ""))
+	rewarder := &autoRewarder{characters: characters, party: party, tavern: tavern, cosmetics: cosmetics}
 
 	switch {
 	case strings.EqualFold(title, "announcement"):
@@ -2629,9 +2627,9 @@ func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherMa
 		handlePossessionRedeem(ctx, event, characters, party, commands, tavern)
 	case strings.EqualFold(title, dailyLoginRewardTitle),
 		strings.EqualFold(title, "general_test"):
-		handleLoginCountRedeem(ctx, event, commands, "daily login", store.increment, dailyLoginMessage)
+		handleLoginCountRedeem(ctx, event, store, loginsCounter, "daily login", dailyLoginMessage, rewarder, commands)
 	case strings.EqualFold(title, firstLoginRewardTitle):
-		handleLoginCountRedeem(ctx, event, commands, "first login", store.incrementFirst, firstLoginMessage)
+		handleLoginCountRedeem(ctx, event, store, firstLoginsCounter, "first login", firstLoginMessage, rewarder, commands)
 	default:
 		return
 	}
@@ -2650,9 +2648,9 @@ func firstLoginMessage(userLogin string, count int64) string {
 }
 
 // handleLoginCountRedeem processes a login-bonus redemption: bump the
-// redeemer's counter and tell them the new total in chat. kind names the
-// redeem in logs.
-func handleLoginCountRedeem(ctx context.Context, event map[string]any, commands *commandPublisher, kind string, increment func(context.Context, string, string) (int64, error), message func(string, int64) string) {
+// redeemer's counter, tell them the new total in chat, then hand out any
+// autoRewards the new total has earned. kind names the redeem in logs.
+func handleLoginCountRedeem(ctx context.Context, event map[string]any, store *loginStore, counter, kind string, message func(string, int64) string, rewarder *autoRewarder, commands *commandPublisher) {
 	userID := firstString(event["user_id"], "")
 	userLogin := firstString(event["user_login"], event["user_name"], userID)
 	if userID == "" {
@@ -2663,24 +2661,109 @@ func handleLoginCountRedeem(ctx context.Context, event map[string]any, commands 
 	opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	count, err := increment(opCtx, userID, userLogin)
+	count, err := store.bump(opCtx, counter, userID, userLogin)
 	if err != nil {
 		log.Printf("failed to increment %s count for %s: %v", kind, userID, err)
 		return
 	}
 	log.Printf("%s incremented: user=%s count=%d", kind, userLogin, count)
 
+	messages := []string{message(userLogin, count)}
+	for _, r := range rewarder.grant(opCtx, userID, userLogin, counter, count) {
+		messages = append(messages, autoRewardMessage(userLogin, r))
+	}
+
 	broadcasterID := firstString(event["broadcaster_user_id"], "")
 	if broadcasterID == "" {
 		log.Printf("%s bonus redemption missing broadcaster_user_id", kind)
 		return
 	}
-	if err := commands.publish(opCtx, "channel.command.send_chat", map[string]any{
-		"channel_id": broadcasterID,
-		"message":    message(userLogin, count),
-	}); err != nil {
-		log.Printf("failed to publish %s chat command: %v", kind, err)
+	for _, msg := range messages {
+		if err := commands.publish(opCtx, "channel.command.send_chat", map[string]any{
+			"channel_id": broadcasterID,
+			"message":    msg,
+		}); err != nil {
+			log.Printf("failed to publish %s chat command: %v", kind, err)
+		}
 	}
+}
+
+// autoReward hands a chatter a cosmetic automatically once one of their
+// chatters counters reaches a milestone. To add one, draw the item, add it
+// to cosmetics.json, and add a line to autoRewards.
+type autoReward struct {
+	Counter  string // a counter column, e.g. firstLoginsCounter
+	AtLeast  int64  // granted once the counter reaches this
+	Cosmetic string // catalog id
+	Noun     string // what the announcement calls it: "the <id> <noun>"
+}
+
+var autoRewards = []autoReward{
+	{Counter: firstLoginsCounter, AtLeast: 1, Cosmetic: "bronze_first", Noun: "shirt"},
+}
+
+func autoRewardMessage(userLogin string, r autoReward) string {
+	return fmt.Sprintf("@%s you have received the %s %s!", userLogin, r.Cosmetic, r.Noun)
+}
+
+// grantAutoRewards gives c every reward on counter that count has earned and
+// c doesn't already own, returning the ones it granted. Owned items are
+// skipped rather than re-granted, so a reward lands once, and a chatter who
+// was already past the milestone picks it up on their next redeem.
+func grantAutoRewards(cat *cosmeticCatalog, c *character, counter string, count int64) []autoReward {
+	var granted []autoReward
+	for _, r := range autoRewards {
+		if r.Counter != counter || count < r.AtLeast || ownsCosmetic(c, r.Cosmetic) {
+			continue
+		}
+		if _, _, err := cat.give(c, r.Cosmetic); err != nil {
+			log.Printf("auto reward %s for %s: %v", r.Cosmetic, c.Name, err)
+			continue
+		}
+		granted = append(granted, r)
+	}
+	return granted
+}
+
+// autoRewarder applies grantAutoRewards to a chatter's live character and
+// saves it, redrawing them if they're on screen.
+type autoRewarder struct {
+	characters *characterStore
+	party      *partyManager
+	tavern     *tavernManager
+	cosmetics  *cosmeticCatalogStore
+}
+
+func (r *autoRewarder) grant(ctx context.Context, userID, userLogin, counter string, count int64) []autoReward {
+	// Only touch the DB when a reward on this counter could be due.
+	if !slices.ContainsFunc(autoRewards, func(a autoReward) bool { return a.Counter == counter && count >= a.AtLeast }) {
+		return nil
+	}
+	// Edit the in-party copy if there is one, like DM commands do, so the
+	// next party save doesn't overwrite the new item.
+	c := r.party.findInParty(userLogin)
+	if c == nil {
+		loaded, err := r.characters.getOrCreate(ctx, userID, userLogin)
+		if err != nil {
+			log.Printf("auto reward: failed to load character for %s: %v", userLogin, err)
+			return nil
+		}
+		c = loaded
+	}
+	granted := grantAutoRewards(r.cosmetics.get(), c, counter, count)
+	if len(granted) == 0 {
+		return nil
+	}
+	if err := r.characters.save(ctx, c); err != nil {
+		log.Printf("auto reward: failed to save %s: %v", c.Name, err)
+		return nil
+	}
+	if r.party.findInParty(c.Name) != nil {
+		r.party.notifyChange()
+	} else {
+		r.tavern.refresh(c)
+	}
+	return granted
 }
 
 func isAuthorizedForOther(event map[string]any) bool {
