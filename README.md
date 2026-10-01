@@ -83,7 +83,7 @@ An overlay controller service streams `channel.chat.message` events to browser c
 
 - **Billboard (`.other-box`)**: 1160×148 px box at left 727, top 918. Padding (16px sides, 8px top/bottom) leaves a 1128×132 px content area; anything that doesn't fit is clipped (`overflow: hidden`), and text renders at 28px (`clamp(16px, 1.6vw, 28px)`) on a 1920-wide canvas.
 - **Chat box (`#chat-box`)**: 330 px wide at top 20, left 20, max-height 64vh (~691 px at 1080p). Monospace 16px ⇒ lines wrap at roughly 34 characters, including the `username:` prefix.
-- **Tavern walking strip (`#tavern-area`)**: bottom of screen, left 25% → right edge, 260 px tall (placeholder until real background art).
+- **Tavern walking strip (`#tavern-area`)**: bottom of screen, left 25% → right edge, 260 px tall. Backdrop is `overlay/assets/tavern_bg.png` (1440×260, transparent sky, tavern behind a grass/dirt floor), regenerated with `python3 tools/gen_tavern_bg.py` (needs Pillow). The billboard and party cards draw over it.
 - **Party cards (`.party-cards`)**: anchored bottom-right (right 20, bottom 172), 116 px per card, growing leftward.
 
 ### Chat commands
