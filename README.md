@@ -91,6 +91,7 @@ An overlay controller service streams `channel.chat.message` events to browser c
 - **`ping`** (any chatter): starts a brief Pong animation in the lower “other” box for about a minute.
 - **`!other <text>`** (broadcaster/moderators): replaces the lower box with your message. Basic Markdown is rendered (e.g., `*italic*`, `**bold**`, lists, headings).
 - **Channel point reward titled “announcement”**: when redeemed, the lower box shows the submitted text (Markdown supported) for five minutes.
+- **Channel point rewards titled “daily login bonus” and “first login bonus”**: each redeem adds one to that chatter's count (`logins` / `first_logins` in the `chatters` table) and the bot replies in chat with the new total, e.g. “@name you've logged in first 3 times!”.
 - **`!fire`** (broadcaster/moderators): clears any active announcement early and restores the last `!other` content.
 
 ### Cosmetics (Dabling outfits)

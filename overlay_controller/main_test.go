@@ -723,3 +723,19 @@ func TestOutfitsReachTheOverlay(t *testing.T) {
 		}
 	})
 }
+
+// The two login-bonus redeems share a handler; their chat lines must not.
+func TestLoginMessages(t *testing.T) {
+	cases := []struct {
+		got, want string
+	}{
+		{dailyLoginMessage("dabi", 7), "@dabi your daily login count is now 7!"},
+		{firstLoginMessage("dabi", 1), "@dabi you've logged in first 1 time!"},
+		{firstLoginMessage("dabi", 12), "@dabi you've logged in first 12 times!"},
+	}
+	for _, tc := range cases {
+		if tc.got != tc.want {
+			t.Errorf("got %q, want %q", tc.got, tc.want)
+		}
+	}
+}

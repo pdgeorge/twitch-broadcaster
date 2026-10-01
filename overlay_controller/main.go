@@ -95,6 +95,7 @@ type commandPublisher struct {
 }
 
 const dailyLoginRewardTitle = "daily login bonus"
+const firstLoginRewardTitle = "first login bonus"
 const joinPartyRewardTitle = "join the party"
 const partyMaxSize = 4
 const expCooldownDuration = 45 * time.Second
@@ -228,6 +229,22 @@ func (p *commandPublisher) close() {
 	}
 }
 
+// addChattersColumns migrates the chatters table forward. MySQL 8 has no
+// ADD COLUMN IF NOT EXISTS (MariaDB-only), so add columns one at a time and
+// treat error 1060 (duplicate column) as already migrated.
+func addChattersColumns(ctx context.Context, db *sql.DB, columns ...string) error {
+	for _, col := range columns {
+		if _, err := db.ExecContext(ctx, "ALTER TABLE chatters ADD COLUMN "+col); err != nil {
+			var mysqlErr *mysql.MySQLError
+			if errors.As(err, &mysqlErr) && mysqlErr.Number == 1060 {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *loginStore) init(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 	CREATE TABLE IF NOT EXISTS chatters (
@@ -243,10 +260,27 @@ func (s *loginStore) init(ctx context.Context) error {
 	PRIMARY KEY (twitch_chatter_id),
 	INDEX idx_chatters_name (twitch_chatter_name)
 	)`)
-	return err
+	if err != nil {
+		return err
+	}
+	// first_logins counts "first login bonus" redeems, separately from the
+	// daily logins that feed exp and voice tiers.
+	return addChattersColumns(ctx, s.db, "first_logins INT NOT NULL DEFAULT 0")
 }
 
+// increment counts a "daily login bonus" redeem and returns the new total.
 func (s *loginStore) increment(ctx context.Context, userID, userLogin string) (int64, error) {
+	return s.bump(ctx, "logins", userID, userLogin)
+}
+
+// incrementFirst counts a "first login bonus" redeem and returns the new total.
+func (s *loginStore) incrementFirst(ctx context.Context, userID, userLogin string) (int64, error) {
+	return s.bump(ctx, "first_logins", userID, userLogin)
+}
+
+// bump adds one to a chatters counter column, creating the row if needed.
+// column only ever comes from increment/incrementFirst, never user input.
+func (s *loginStore) bump(ctx context.Context, column, userID, userLogin string) (int64, error) {
 	// Convert Twitch user id from string -> int64 for BIGINT column
 	id, err := strconv.ParseInt(userID, 10, 64)
 	if err != nil {
@@ -254,10 +288,10 @@ func (s *loginStore) increment(ctx context.Context, userID, userLogin string) (i
 	}
 
 	_, err = s.db.ExecContext(ctx, `
-	INSERT INTO chatters (twitch_chatter_id, twitch_chatter_name, logins, last_seen_at)
+	INSERT INTO chatters (twitch_chatter_id, twitch_chatter_name, `+column+`, last_seen_at)
 	VALUES (?, ?, 1, NOW())
 	ON DUPLICATE KEY UPDATE
-	  logins = logins + 1,
+	  `+column+` = `+column+` + 1,
 	  twitch_chatter_name = VALUES(twitch_chatter_name),
 	  last_seen_at = NOW()
 	`, id, userLogin)
@@ -267,7 +301,7 @@ func (s *loginStore) increment(ctx context.Context, userID, userLogin string) (i
 
 	// Fetch the new count
 	row := s.db.QueryRowContext(ctx, `
-	SELECT logins FROM chatters WHERE twitch_chatter_id = ?
+	SELECT `+column+` FROM chatters WHERE twitch_chatter_id = ?
 	`, id)
 
 	var count int64
@@ -736,26 +770,14 @@ func newCharacterStore(db *sql.DB) *characterStore {
 }
 
 func (s *characterStore) init(ctx context.Context) error {
-	// MySQL 8 has no ADD COLUMN IF NOT EXISTS (MariaDB-only), so add columns
-	// one at a time and treat error 1060 (duplicate column) as already migrated.
-	columns := []string{
+	return addChattersColumns(ctx, s.db,
 		"level  INT  NOT NULL DEFAULT 1",
 		"hp     INT  NOT NULL DEFAULT 14",
 		"max_hp INT  NOT NULL DEFAULT 14",
 		"alive  TINYINT(1) NOT NULL DEFAULT 1",
 		"sheet  JSON NULL",
 		"equipped JSON NULL",
-	}
-	for _, col := range columns {
-		if _, err := s.db.ExecContext(ctx, "ALTER TABLE chatters ADD COLUMN "+col); err != nil {
-			var mysqlErr *mysql.MySQLError
-			if errors.As(err, &mysqlErr) && mysqlErr.Number == 1060 {
-				continue
-			}
-			return err
-		}
-	}
-	return nil
+	)
 }
 
 func scanCharacter(row *sql.Row) (*character, error) {
@@ -2607,37 +2629,57 @@ func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherMa
 		handlePossessionRedeem(ctx, event, characters, party, commands, tavern)
 	case strings.EqualFold(title, dailyLoginRewardTitle),
 		strings.EqualFold(title, "general_test"):
-		userID := firstString(event["user_id"], "")
-		userLogin := firstString(event["user_login"], event["user_name"], userID)
-		if userID == "" {
-			log.Print("daily login bonus redemption missing user_id")
-			return
-		}
-
-		opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-
-		count, err := store.increment(opCtx, userID, userLogin)
-		if err != nil {
-			log.Printf("failed to increment login count for %s: %v", userID, err)
-			return
-		}
-		log.Printf("daily login incremented: user=%s count=%d", userLogin, count)
-
-		message := fmt.Sprintf("@%s your daily login count is now %d!", userLogin, count)
-		broadcasterID := firstString(event["broadcaster_user_id"], "")
-		if broadcasterID == "" {
-			log.Print("daily login bonus redemption missing broadcaster_user_id")
-			return
-		}
-		if err := commands.publish(opCtx, "channel.command.send_chat", map[string]any{
-			"channel_id": broadcasterID,
-			"message":    message,
-		}); err != nil {
-			log.Printf("failed to publish daily login chat command: %v", err)
-		}
+		handleLoginCountRedeem(ctx, event, commands, "daily login", store.increment, dailyLoginMessage)
+	case strings.EqualFold(title, firstLoginRewardTitle):
+		handleLoginCountRedeem(ctx, event, commands, "first login", store.incrementFirst, firstLoginMessage)
 	default:
 		return
+	}
+}
+
+func dailyLoginMessage(userLogin string, count int64) string {
+	return fmt.Sprintf("@%s your daily login count is now %d!", userLogin, count)
+}
+
+func firstLoginMessage(userLogin string, count int64) string {
+	times := "times"
+	if count == 1 {
+		times = "time"
+	}
+	return fmt.Sprintf("@%s you've logged in first %d %s!", userLogin, count, times)
+}
+
+// handleLoginCountRedeem processes a login-bonus redemption: bump the
+// redeemer's counter and tell them the new total in chat. kind names the
+// redeem in logs.
+func handleLoginCountRedeem(ctx context.Context, event map[string]any, commands *commandPublisher, kind string, increment func(context.Context, string, string) (int64, error), message func(string, int64) string) {
+	userID := firstString(event["user_id"], "")
+	userLogin := firstString(event["user_login"], event["user_name"], userID)
+	if userID == "" {
+		log.Printf("%s bonus redemption missing user_id", kind)
+		return
+	}
+
+	opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	count, err := increment(opCtx, userID, userLogin)
+	if err != nil {
+		log.Printf("failed to increment %s count for %s: %v", kind, userID, err)
+		return
+	}
+	log.Printf("%s incremented: user=%s count=%d", kind, userLogin, count)
+
+	broadcasterID := firstString(event["broadcaster_user_id"], "")
+	if broadcasterID == "" {
+		log.Printf("%s bonus redemption missing broadcaster_user_id", kind)
+		return
+	}
+	if err := commands.publish(opCtx, "channel.command.send_chat", map[string]any{
+		"channel_id": broadcasterID,
+		"message":    message(userLogin, count),
+	}); err != nil {
+		log.Printf("failed to publish %s chat command: %v", kind, err)
 	}
 }
 
