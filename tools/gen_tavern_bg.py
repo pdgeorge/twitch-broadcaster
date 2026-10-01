@@ -1,8 +1,10 @@
 """Generate overlay/assets/tavern_bg.png, the backdrop for #tavern-area.
 
 The strip is 1440x260 on the 1920x1080 canvas (left 25% -> right edge,
-bottom 260px). The sky is left transparent so the stream shows through;
-the tavern sits behind a grass/dirt ground the Dablings walk on (they stand
+bottom 260px). Everything above the ground is transparent so the stream
+shows through; the tavern is background fluff, drawn at a fixed size, then
+shrunk so its top sits at TAVERN_TOP and its right edge at TAVERN_RIGHT.
+It stands behind a grass/dirt ground the Dablings walk on (they stand
 0-14px above the bottom edge).
 
 Run from the repo root: python3 tools/gen_tavern_bg.py  (needs Pillow)
@@ -44,29 +46,8 @@ def ellipse(x0, y0, x1, y1, fill, outline=None, width=0):
 
 
 GROUND_Y = 206  # top of the grass line
-
-# --- distant hills, faded so they read as far away -------------------------
-hills = Image.new("RGBA", img.size, (0, 0, 0, 0))
-hd = ImageDraw.Draw(hills)
-for cx, r, col in [(120, 150, (88, 128, 82, 150)), (1300, 170, (88, 128, 82, 150)),
-                   (430, 110, (98, 140, 90, 130)), (1020, 130, (98, 140, 90, 130))]:
-    hd.ellipse([(cx - r * 1.6) * S, (GROUND_Y - r * 0.55) * S,
-                (cx + r * 1.6) * S, (GROUND_Y + r) * S], fill=col)
-img.alpha_composite(hills.filter(ImageFilter.GaussianBlur(2 * S)))
-d = ImageDraw.Draw(img)
-
-
-# --- trees either side -----------------------------------------------------
-def tree(x, top, h):
-    rect(x - 6, top + h * 0.55, x + 6, GROUND_Y + 4, (84, 58, 36, 255))
-    for dx, dy, r, c in [(0, 0.30, 0.34, (46, 92, 52, 255)), (-0.22, 0.45, 0.28, (52, 102, 56, 255)),
-                         (0.22, 0.45, 0.28, (52, 102, 56, 255)), (0, 0.15, 0.24, (60, 114, 62, 255))]:
-        cx, cy, rr = x + dx * h, top + dy * h, r * h
-        ellipse(cx - rr, cy - rr, cx + rr, cy + rr, c)
-
-
-for x, top, h in [(70, 70, 150), (190, 95, 120), (1250, 80, 140), (1370, 60, 160)]:
-    tree(x, top, h)
+TAVERN_TOP = 58  # chimney top; level with the top of the taskbar-free band
+TAVERN_RIGHT = 1420  # right edge of the right-hand fence
 
 # --- the tavern ------------------------------------------------------------
 BX0, BX1 = 470, 970          # main hall
@@ -188,6 +169,18 @@ for x0, x1 in [(250, 440), (1000, 1190)]:
     for x in range(x0 + 4, x1, 26):
         poly([(x - 4, 172), (x, 166), (x + 4, 172), (x + 4, GROUND_Y + 2), (x - 4, GROUND_Y + 2)],
              (158, 120, 76, 255), (90, 64, 40, 255), 1)
+
+# --- shrink the tavern and fences into place --------------------------------
+tavern = img.crop((0, 0, W * S, (GROUND_Y + 2) * S))
+bx0, by0, bx1, by1 = tavern.getbbox()
+k = (GROUND_Y + 2 - TAVERN_TOP) / ((by1 - by0) / S)
+tavern = tavern.crop((bx0, by0, bx1, by1))
+tavern = tavern.resize((round(tavern.width * k), round(tavern.height * k)), Image.LANCZOS)
+left = TAVERN_RIGHT * S - tavern.width
+img = Image.new("RGBA", (W * S, H * S), (0, 0, 0, 0))
+img.alpha_composite(tavern, (left, TAVERN_TOP * S))
+d = ImageDraw.Draw(img)
+DX = (left + (DX * S - bx0) * k) / S  # door position after the move
 
 # --- ground: grass edge over a dirt floor ----------------------------------
 DIRT = (122, 88, 56, 255)
