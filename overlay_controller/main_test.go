@@ -739,3 +739,63 @@ func TestLoginMessages(t *testing.T) {
 		}
 	}
 }
+
+// Auto rewards land once, only on their own counter, only from the milestone.
+func TestGrantAutoRewards(t *testing.T) {
+	cat := &cosmeticCatalog{
+		Slots: []string{"torso"},
+		Items: map[string]cosmeticItem{"bronze_first": {Slot: "torso", Src: "b.png"}},
+	}
+
+	c := newChar("Hez", 0)
+	if got := grantAutoRewards(cat, c, firstLoginsCounter, 0); len(got) != 0 {
+		t.Errorf("granted %v before the milestone", got)
+	}
+	if got := grantAutoRewards(cat, c, loginsCounter, 5); len(got) != 0 {
+		t.Errorf("daily logins granted %v", got)
+	}
+	got := grantAutoRewards(cat, c, firstLoginsCounter, 1)
+	if len(got) != 1 || got[0].Cosmetic != "bronze_first" {
+		t.Fatalf("first first-login granted %v, want bronze_first", got)
+	}
+	if !slices.Equal(c.Cosmetics, []string{"bronze_first"}) || c.Equipped["torso"] != "bronze_first" {
+		t.Errorf("wardrobe %v, equipped %v; want bronze_first worn", c.Cosmetics, c.Equipped)
+	}
+	if got := grantAutoRewards(cat, c, firstLoginsCounter, 2); len(got) != 0 {
+		t.Errorf("re-granted %v on the next redeem", got)
+	}
+
+	late := newChar("Ves", 0)
+	if got := grantAutoRewards(cat, late, firstLoginsCounter, 4); len(got) != 1 {
+		t.Errorf("chatter already past the milestone got %v, want bronze_first", got)
+	}
+
+	if got := grantAutoRewards(&cosmeticCatalog{}, newChar("Kip", 0), firstLoginsCounter, 1); len(got) != 0 {
+		t.Errorf("granted %v from a catalog without the item", got)
+	}
+
+	if msg := autoRewardMessage("dabi", autoRewards[0]); msg != "@dabi you have received the bronze_first shirt!" {
+		t.Errorf("announcement = %q", msg)
+	}
+}
+
+// Every auto reward must name an item that ships in the catalog, or it
+// silently never lands.
+func TestShippedAutoRewards(t *testing.T) {
+	data, err := os.ReadFile("../overlay/assets/cosmetics/cosmetics.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat, err := parseCosmeticCatalog(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range autoRewards {
+		if _, _, ok := cat.lookup(r.Cosmetic); !ok {
+			t.Errorf("auto reward %q isn't in cosmetics.json", r.Cosmetic)
+		}
+		if r.Counter != loginsCounter && r.Counter != firstLoginsCounter {
+			t.Errorf("auto reward %q watches unknown counter %q", r.Cosmetic, r.Counter)
+		}
+	}
+}
