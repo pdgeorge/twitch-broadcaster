@@ -112,12 +112,10 @@ func newOverlayHub() *overlayHub {
 }
 
 type otherManager struct {
-	mu                 sync.Mutex
-	hub                *overlayHub
-	baseHTML           string
-	announcementTimer  *time.Timer
-	pongStop           chan struct{}
-	pongInitialMessage string
+	mu                sync.Mutex
+	hub               *overlayHub
+	baseHTML          string
+	announcementTimer *time.Timer
 }
 
 func (h *overlayHub) add(conn *websocket.Conn) {
@@ -1174,7 +1172,7 @@ func (h *overlayHub) handleWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func newOtherManager(hub *overlayHub) *otherManager {
-	return &otherManager{hub: hub, pongInitialMessage: "<pre class=\"pong-frame\">Starting pong...</pre>"}
+	return &otherManager{hub: hub}
 }
 
 func (o *otherManager) send(obj any) {
@@ -1230,171 +1228,6 @@ func (o *otherManager) restoreBase(mode string) {
 	base := o.baseHTML
 	o.mu.Unlock()
 	o.send(map[string]any{"type": "other.update", "mode": mode, "html": base})
-}
-
-func (o *otherManager) startPong(duration time.Duration) {
-	o.mu.Lock()
-	if o.pongStop != nil {
-		o.mu.Unlock()
-		return
-	}
-	if o.announcementTimer != nil {
-		o.announcementTimer.Stop()
-		o.announcementTimer = nil
-	}
-	stopChan := make(chan struct{})
-	o.pongStop = stopChan
-	o.mu.Unlock()
-
-	o.send(map[string]any{
-		"type":             "other.pong_start",
-		"duration_seconds": int(duration.Seconds()),
-		"html":             o.pongInitialMessage,
-	})
-
-	go o.runPong(stopChan, duration)
-}
-
-func (o *otherManager) runPong(stopChan chan struct{}, duration time.Duration) {
-	ticker := time.NewTicker(180 * time.Millisecond)
-	defer ticker.Stop()
-
-	width := 28
-	height := 6
-	paddleSize := 3
-	leftX, rightX := 0, width-1
-
-	ballX, ballY := width/2, height/2
-	dx, dy := 1, 1
-
-	leftY, rightY := height/2, height/2
-	leftDir, rightDir := 1, -1
-
-	deadline := time.After(duration)
-
-	render := func(ballX, ballY, leftY, rightY int) string {
-		grid := make([][]rune, height)
-		for i := 0; i < height; i++ {
-			row := make([]rune, width)
-			for j := 0; j < width; j++ {
-				row[j] = ' '
-			}
-			grid[i] = row
-		}
-
-		for offset := -1; offset <= 1; offset++ {
-			if y := leftY + offset; y >= 0 && y < height {
-				grid[y][leftX] = '|'
-			}
-			if y := rightY + offset; y >= 0 && y < height {
-				grid[y][rightX] = '|'
-			}
-		}
-
-		if ballY >= 0 && ballY < height && ballX >= 0 && ballX < width {
-			grid[ballY][ballX] = 'O'
-		}
-
-		var sb strings.Builder
-		sb.WriteString("<pre class=\"pong-frame\">")
-		for _, row := range grid {
-			sb.WriteString(string(row))
-			sb.WriteByte('\n')
-		}
-		sb.WriteString("</pre>")
-		return sb.String()
-	}
-
-	for {
-		select {
-		case <-ticker.C:
-			leftY += leftDir
-			if leftY <= 1 {
-				leftY = 1
-				leftDir = 1
-			} else if leftY >= height-2 {
-				leftY = height - 2
-				leftDir = -1
-			}
-
-			rightY += rightDir
-			if rightY <= 1 {
-				rightY = 1
-				rightDir = 1
-			} else if rightY >= height-2 {
-				rightY = height - 2
-				rightDir = -1
-			}
-
-			nextX := ballX + dx
-			nextY := ballY + dy
-
-			if nextY < 0 || nextY >= height {
-				dy = -dy
-				nextY = ballY + dy
-			}
-
-			if nextX <= leftX {
-				if abs(nextY-leftY) <= paddleSize/2 {
-					dx = 1
-					if nextY < leftY {
-						dy = -1
-					} else if nextY > leftY {
-						dy = 1
-					}
-				} else {
-					dx = 1
-				}
-				nextX = ballX + dx
-			} else if nextX >= rightX {
-				if abs(nextY-rightY) <= paddleSize/2 {
-					dx = -1
-					if nextY < rightY {
-						dy = -1
-					} else if nextY > rightY {
-						dy = 1
-					}
-				} else {
-					dx = -1
-				}
-				nextX = ballX + dx
-			}
-
-			ballX, ballY = nextX, nextY
-			o.send(map[string]any{"type": "other.pong_frame", "html": render(ballX, ballY, leftY, rightY)})
-		case <-deadline:
-			o.stopPong(stopChan)
-			return
-		case <-stopChan:
-			o.stopPong(stopChan)
-			return
-		}
-	}
-}
-
-func (o *otherManager) stopPong(stopChan chan struct{}) {
-	o.mu.Lock()
-	if o.pongStop != stopChan {
-		o.mu.Unlock()
-		return
-	}
-	o.pongStop = nil
-	o.mu.Unlock()
-	o.restoreBase("base_restore")
-}
-
-func startPongTicker(ctx context.Context, other *otherManager) {
-	ticker := time.NewTicker(15 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			other.startPong(time.Minute)
-		case <-ctx.Done():
-			return
-		}
-	}
 }
 
 // broadcastJSON marshals obj and pushes it to every connected overlay client.
@@ -1774,7 +1607,6 @@ func main() {
 	tavern := newTavernManager(hub, cosmetics)
 	sounds := newSoundBoard(soundsDir, hub)
 	go hub.run(ctx)
-	go startPongTicker(ctx, other)
 	go tavern.run(ctx)
 	go func() {
 		if err := consumeChat(ctx, cfg, hub, other, store, characters, party, expCooldown, botCommands, chatLog, commandPublisher, tts, tavern, cosmetics, sounds); err != nil {
@@ -2111,13 +1943,6 @@ func messageTextFromEvent(event map[string]any) string {
 	return ""
 }
 
-func abs(i int) int {
-	if i < 0 {
-		return -i
-	}
-	return i
-}
-
 func markdownToHTML(input string) string {
 	var buf bytes.Buffer
 	if err := goldmark.Convert([]byte(input), &buf); err != nil {
@@ -2141,10 +1966,6 @@ func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub,
 
 	messageText := messageTextFromEvent(event)
 	lower := strings.ToLower(strings.TrimSpace(messageText))
-
-	if strings.Contains(lower, "ping") {
-		other.startPong(time.Minute)
-	}
 
 	grantMessageExp(ctx, event, characters, party, expCooldown)
 	trackTavernPresence(ctx, event, characters, party, tavern)

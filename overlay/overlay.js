@@ -3,7 +3,6 @@
   const otherBox = document.getElementById('other-box');
   const partyCardsBox = document.getElementById('party-cards');
   let otherBaseHTML = '';
-  let pongActive = false;
 
   // Paper-doll sprite: the tinted base Dabling with one full-canvas PNG per
   // equipped cosmetic stacked on top (the controller sends them in draw
@@ -460,18 +459,7 @@
           } else if (payload.mode === 'force_restore' || payload.mode === 'base_restore') {
             setOtherContent(payload.html || otherBaseHTML);
           }
-          pongActive = false;
           return;
-        }
-
-        if (payload.type === 'other.pong_start') {
-          pongActive = true;
-          setOtherContent(payload.html || '');
-          return;
-        }
-
-        if (payload.type === 'other.pong_frame' && pongActive) {
-          setOtherContent(payload.html || '');
         }
 
         if (payload.type === 'party.update') {
