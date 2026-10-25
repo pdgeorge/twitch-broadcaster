@@ -410,13 +410,16 @@ type cosmeticItem struct {
 	Src  string `json:"src"`
 }
 
-// cosmeticCatalog is every cosmetic that exists, loaded from
+// cosmeticCatalog is every cosmetic that exists: the live catalog in
+// data/cosmetics/cosmetics.json, which takes in the starter items shipped in
 // overlay/assets/cosmetics/cosmetics.json. Slots is the draw order (first is
 // drawn lowest, directly over the body); Items is keyed by the id chat types,
 // matched case-insensitively. A character wears at most one item per slot.
+// Seeded lists the starter items the live catalog has taken in.
 type cosmeticCatalog struct {
-	Slots []string                `json:"slots"`
-	Items map[string]cosmeticItem `json:"items"`
+	Slots  []string                `json:"slots"`
+	Items  map[string]cosmeticItem `json:"items"`
+	Seeded []string                `json:"seeded,omitempty"`
 }
 
 // parseCosmeticCatalog rejects the whole file on any bad entry, so a broken
@@ -588,11 +591,15 @@ func (cat *cosmeticCatalog) wardrobeSummary(c *character) string {
 // restart, whether through /admin or by hand. A broken hand edit is logged and
 // the last good catalog stays in use.
 type cosmeticCatalogStore struct {
-	path    string
-	mu      sync.Mutex
-	modTime time.Time
-	warned  bool
-	catalog *cosmeticCatalog
+	path string
+	// starterPath, if set, is the repo's starter catalog: when a git pull
+	// changes it, its new items are merged into path, again without a restart.
+	starterPath string
+	starterMod  time.Time
+	mu          sync.Mutex
+	modTime     time.Time
+	warned      bool
+	catalog     *cosmeticCatalog
 }
 
 func newCosmeticCatalogStore(path string) *cosmeticCatalogStore {
@@ -611,6 +618,16 @@ func (s *cosmeticCatalogStore) get() *cosmeticCatalog {
 }
 
 func (s *cosmeticCatalogStore) refreshLocked() {
+	if s.starterPath != "" {
+		if info, err := os.Stat(s.starterPath); err == nil && !info.ModTime().Equal(s.starterMod) {
+			s.starterMod = info.ModTime()
+			if changed, err := syncStarterCatalog(s.starterPath, s.path); err != nil {
+				log.Printf("cosmetics: can't merge the starter catalog into %s: %v", s.path, err)
+			} else if changed {
+				s.modTime = time.Time{} // reload even if the rewrite kept the old mtime
+			}
+		}
+	}
 	info, err := os.Stat(s.path)
 	if err != nil {
 		if !s.warned {
@@ -646,7 +663,7 @@ func (s *cosmeticCatalogStore) update(change func(cat *cosmeticCatalog) error) e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refreshLocked() // build on any hand edit made since the last read
-	next := &cosmeticCatalog{Slots: slices.Clone(s.catalog.Slots), Items: maps.Clone(s.catalog.Items)}
+	next := &cosmeticCatalog{Slots: slices.Clone(s.catalog.Slots), Items: maps.Clone(s.catalog.Items), Seeded: slices.Clone(s.catalog.Seeded)}
 	if next.Items == nil {
 		next.Items = map[string]cosmeticItem{}
 	}
@@ -673,23 +690,72 @@ func (s *cosmeticCatalogStore) update(change func(cat *cosmeticCatalog) error) e
 	return nil
 }
 
-// seedCosmeticCatalog gives a fresh data dir its live catalog: a copy of the
-// starter one in the repo. From then on the copy is the catalog (it's what
-// /admin edits), so the git checkout on the Pi never picks up local changes.
-// The starter items' images stay where they ship, in overlay/assets.
-func seedCosmeticCatalog(shipped, live string) error {
-	if _, err := os.Stat(live); err == nil || !errors.Is(err, fs.ErrNotExist) {
-		return err
+// mergeStarterCosmetics adds the starter items live hasn't taken in yet, so
+// cosmetics can still ship with the code (an autoRewards item, say) after the
+// live catalog has moved on. Seeded remembers every starter id ever taken in:
+// an item deleted in /admin stays deleted, and one live already has (with new
+// art from /admin, say) is left alone. Reports whether live changed.
+func mergeStarterCosmetics(live, starter *cosmeticCatalog) bool {
+	if live.Items == nil {
+		live.Items = map[string]cosmeticItem{}
 	}
-	data, err := os.ReadFile(shipped)
+	changed := false
+	for _, id := range starter.ids() {
+		if slices.Contains(live.Seeded, id) {
+			continue
+		}
+		live.Seeded = append(live.Seeded, id)
+		changed = true
+		if _, _, exists := live.lookup(id); exists {
+			continue
+		}
+		item := starter.Items[id]
+		if !slices.Contains(live.Slots, item.Slot) {
+			live.Slots = append(live.Slots, item.Slot)
+		}
+		live.Items[id] = item
+		log.Printf("cosmetics: added %s from the starter catalog", id)
+	}
+	return changed
+}
+
+// syncStarterCatalog merges the repo's starter catalog into the live one,
+// creating it on first run. The live catalog is what /admin edits, kept in the
+// data dir so the git checkout on the Pi never picks up local changes; the
+// starter items' images stay where they ship, in overlay/assets. A broken live
+// file is left alone for a human to fix. Reports whether it wrote the live file.
+func syncStarterCatalog(starterPath, livePath string) (bool, error) {
+	data, err := os.ReadFile(starterPath)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if err := os.MkdirAll(filepath.Dir(live), 0o755); err != nil {
-		return err
+	starter, err := parseCosmeticCatalog(data)
+	if err != nil {
+		return false, fmt.Errorf("starter catalog: %w", err)
 	}
-	log.Printf("cosmetics: first run, copying the starter catalog to %s", live)
-	return writeFileAtomic(live, data)
+	live := &cosmeticCatalog{Slots: []string{}}
+	fresh := false
+	if data, err = os.ReadFile(livePath); errors.Is(err, fs.ErrNotExist) {
+		fresh = true
+	} else if err != nil {
+		return false, err
+	} else if live, err = parseCosmeticCatalog(data); err != nil {
+		return false, fmt.Errorf("live catalog: %w", err)
+	}
+	if !mergeStarterCosmetics(live, starter) && !fresh {
+		return false, nil
+	}
+	if fresh {
+		log.Printf("cosmetics: first run, copying the starter catalog to %s", livePath)
+		if err := os.MkdirAll(filepath.Dir(livePath), 0o755); err != nil {
+			return false, err
+		}
+	}
+	out, err := json.MarshalIndent(live, "", "  ")
+	if err != nil {
+		return false, err
+	}
+	return true, writeFileAtomic(livePath, append(out, '\n'))
 }
 
 // ttsVoiceTiers gate the voice pool by login count (design doc §9): everyone
@@ -1683,7 +1749,7 @@ func main() {
 
 	// Everything /admin manages lives in the data dir (data/ on the Pi), not
 	// the read-only overlay mount: sounds, uploaded cosmetic art, and the live
-	// cosmetic catalog, seeded from the repo's starter one on first run.
+	// cosmetic catalog, which takes in new items from the repo's starter one.
 	soundsDir := filepath.Join(cfg.dataDir, "sounds")
 	cosmeticsDir := filepath.Join(cfg.dataDir, "cosmetics")
 	if err := os.MkdirAll(soundsDir, 0o755); err != nil {
@@ -1691,11 +1757,13 @@ func main() {
 	}
 	catalogPath := filepath.Join(cosmeticsDir, "cosmetics.json")
 	starterCatalog := filepath.Join(cfg.staticDir, "assets", "cosmetics", "cosmetics.json")
-	if err := seedCosmeticCatalog(starterCatalog, catalogPath); err != nil {
-		log.Printf("cosmetics: can't set up %s, falling back to the starter catalog (read-only): %v", catalogPath, err)
-		catalogPath = starterCatalog
-	}
 	cosmetics := newCosmeticCatalogStore(catalogPath)
+	if _, err := syncStarterCatalog(starterCatalog, catalogPath); err != nil {
+		log.Printf("cosmetics: can't set up %s, falling back to the starter catalog (read-only): %v", catalogPath, err)
+		cosmetics = newCosmeticCatalogStore(starterCatalog)
+	} else {
+		cosmetics.starterPath = starterCatalog
+	}
 	cosmetics.get() // load now so a bad catalog shows up in the startup log
 
 	hub := newOverlayHub()
@@ -2802,7 +2870,9 @@ func handleLoginCountRedeem(ctx context.Context, event map[string]any, store *lo
 
 // autoReward hands a chatter a cosmetic automatically once one of their
 // chatters counters reaches a milestone. To add one, draw the item, add it
-// to cosmetics.json, and add a line to autoRewards.
+// to the starter catalog (overlay/assets/cosmetics/cosmetics.json, which the
+// live one takes in on the next start or git pull), and add a line to
+// autoRewards.
 type autoReward struct {
 	Counter  string // a counter column, e.g. firstLoginsCounter
 	AtLeast  int64  // granted once the counter reaches this

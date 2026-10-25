@@ -19,8 +19,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // testPNG encodes a w x h image: opaque fills every pixel, otherwise it's
@@ -381,27 +383,139 @@ func TestCosmeticCatalogUpdate(t *testing.T) {
 	}
 }
 
-func TestSeedCosmeticCatalog(t *testing.T) {
-	dir := t.TempDir()
-	shipped := filepath.Join(dir, "shipped.json")
-	live := filepath.Join(dir, "data", "cosmetics", "cosmetics.json")
-	writeTestFile(t, shipped, []byte(testCatalogJSON))
+// readCatalog parses a catalog file a test wrote or synced.
+func readCatalog(t *testing.T, path string) *cosmeticCatalog {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat, err := parseCosmeticCatalog(data)
+	if err != nil {
+		t.Fatalf("%s doesn't parse: %v", path, err)
+	}
+	return cat
+}
 
-	if err := seedCosmeticCatalog(shipped, live); err != nil {
+// The live catalog is the one /admin edits, but items the repo ships later
+// (an autoRewards item, say) still have to reach it, without undoing /admin.
+func TestSyncStarterCatalog(t *testing.T) {
+	setup := func(t *testing.T) (starter, live string) {
+		dir := t.TempDir()
+		starter = filepath.Join(dir, "starter.json")
+		writeTestFile(t, starter, []byte(testCatalogJSON))
+		return starter, filepath.Join(dir, "data", "cosmetics", "cosmetics.json")
+	}
+
+	t.Run("first run copies the starter catalog", func(t *testing.T) {
+		starter, live := setup(t)
+		if _, err := syncStarterCatalog(starter, live); err != nil {
+			t.Fatal(err)
+		}
+		if got := readCatalog(t, live); len(got.Items) != 3 || len(got.Seeded) != 3 {
+			t.Errorf("first run gave %d items, %d seeded, want 3 and 3", len(got.Items), len(got.Seeded))
+		}
+	})
+
+	t.Run("a pulled starter item arrives, in a new slot if need be", func(t *testing.T) {
+		starter, live := setup(t)
+		syncStarterCatalog(starter, live)
+		writeTestFile(t, starter, []byte(`{"slots":["torso","head","feet"],"items":{
+			"shirtA":{"slot":"torso","src":"a.png"},
+			"shirtB":{"slot":"torso","src":"b.png"},
+			"tophat":{"slot":"head","src":"hat.png"},
+			"boots":{"slot":"feet","src":"boots.png"}}}`))
+		if _, err := syncStarterCatalog(starter, live); err != nil {
+			t.Fatal(err)
+		}
+		got := readCatalog(t, live)
+		if item, ok := got.Items["boots"]; !ok || item.Slot != "feet" || !slices.Contains(got.Slots, "feet") {
+			t.Errorf("boots = %+v, slots %v: want it added along with its feet slot", item, got.Slots)
+		}
+	})
+
+	t.Run("what /admin deleted or redrew stays that way", func(t *testing.T) {
+		starter, live := setup(t)
+		syncStarterCatalog(starter, live)
+		s := newCosmeticCatalogStore(live)
+		s.get()
+		err := s.update(func(cat *cosmeticCatalog) error {
+			delete(cat.Items, "shirtB")
+			item := cat.Items["shirtA"]
+			item.Src = "cosmetics/shirtA-new.png"
+			cat.Items["shirtA"] = item
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := syncStarterCatalog(starter, live); err != nil {
+			t.Fatal(err)
+		}
+		got := readCatalog(t, live)
+		if _, back := got.Items["shirtB"]; back {
+			t.Error("shirtB came back after /admin deleted it")
+		}
+		if src := got.Items["shirtA"].Src; src != "cosmetics/shirtA-new.png" {
+			t.Errorf("shirtA's src = %s, want /admin's new art kept", src)
+		}
+	})
+
+	t.Run("a live catalog from before seeded existed isn't duplicated", func(t *testing.T) {
+		starter, live := setup(t)
+		os.MkdirAll(filepath.Dir(live), 0o755)
+		writeTestFile(t, live, []byte(`{"slots":["torso","head"],"items":{"shirtA":{"slot":"torso","src":"cosmetics/mine.png"},"tophat":{"slot":"head","src":"hat.png"}}}`))
+		if _, err := syncStarterCatalog(starter, live); err != nil {
+			t.Fatal(err)
+		}
+		got := readCatalog(t, live)
+		if got.Items["shirtA"].Src != "cosmetics/mine.png" || len(got.Items) != 3 || len(got.Seeded) != 3 {
+			t.Errorf("synced to %+v, want shirtA left alone and shirtB added", got)
+		}
+	})
+
+	t.Run("a broken live catalog is left for a human", func(t *testing.T) {
+		starter, live := setup(t)
+		os.MkdirAll(filepath.Dir(live), 0o755)
+		writeTestFile(t, live, []byte(`{"slots":[`))
+		if _, err := syncStarterCatalog(starter, live); err == nil {
+			t.Error("synced over a broken live catalog")
+		}
+		if got, _ := os.ReadFile(live); string(got) != `{"slots":[` {
+			t.Errorf("broken live catalog was rewritten to %s", got)
+		}
+	})
+
+	t.Run("a missing starter catalog is an error", func(t *testing.T) {
+		dir := t.TempDir()
+		if _, err := syncStarterCatalog(filepath.Join(dir, "missing.json"), filepath.Join(dir, "live.json")); err == nil {
+			t.Error("synced from a missing starter catalog")
+		}
+	})
+}
+
+// A git pull that ships a cosmetic reaches the running controller without a
+// restart, the way hand edits do.
+func TestStoreTakesInPulledStarterItems(t *testing.T) {
+	dir := t.TempDir()
+	starter := filepath.Join(dir, "starter.json")
+	live := filepath.Join(dir, "cosmetics.json")
+	base := time.Now().Add(-time.Hour)
+	writeTestFile(t, starter, []byte(`{"slots":["torso"],"items":{"shirtA":{"slot":"torso","src":"a.png"}}}`))
+	os.Chtimes(starter, base, base)
+	if _, err := syncStarterCatalog(starter, live); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := os.ReadFile(live); string(got) != testCatalogJSON {
-		t.Errorf("seeded catalog = %s", got)
+	s := newCosmeticCatalogStore(live)
+	s.starterPath = starter
+	if n := len(s.get().Items); n != 1 {
+		t.Fatalf("loaded %d items, want 1", n)
 	}
-	writeTestFile(t, live, []byte(`{"slots":[],"items":{}}`))
-	if err := seedCosmeticCatalog(shipped, live); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := os.ReadFile(live); string(got) != `{"slots":[],"items":{}}` {
-		t.Error("seeding overwrote a live catalog")
-	}
-	if err := seedCosmeticCatalog(filepath.Join(dir, "missing.json"), filepath.Join(dir, "elsewhere.json")); err == nil {
-		t.Error("seeding from a missing starter catalog reported success")
+
+	writeTestFile(t, starter, []byte(`{"slots":["torso"],"items":{"shirtA":{"slot":"torso","src":"a.png"},"bronze":{"slot":"torso","src":"b.png"}}}`))
+	os.Chtimes(starter, base.Add(time.Minute), base.Add(time.Minute))
+	if _, _, ok := s.get().lookup("bronze"); !ok {
+		t.Error("the pulled item didn't reach the live catalog")
 	}
 }
 
