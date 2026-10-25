@@ -18,7 +18,7 @@ go run ./...
 
 - The server hosts the overlay assets from `OVERLAY_STATIC_DIR` and serves them at `/`.
 - WebSocket clients connect to `/ws/overlay` and receive JSON messages for `chat.message`.
-- The admin page (`/admin`, with its JSON API under `/admin/api/`) manages sound commands and the cosmetic catalog. What it manages lives in `OVERLAY_DATA_DIR`: sounds in `sounds/` (served at `/sounds/`), uploaded cosmetic art and the live catalog in `cosmetics/` (served at `/cosmetics/`).
+- The admin page (`/admin`, with its JSON API under `/admin/api/`) manages sound commands and the cosmetic catalog, and has a guide to the party game. What it manages lives in `OVERLAY_DATA_DIR`: sounds in `sounds/` (served at `/sounds/`), uploaded cosmetic art and the live catalog in `cosmetics/` (served at `/cosmetics/`).
 
 ## Configuration
 

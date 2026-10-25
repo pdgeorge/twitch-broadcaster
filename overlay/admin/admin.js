@@ -647,8 +647,81 @@
     }
   });
 
+  // ---- Party guide ----
+
+  // The words live in the page and the numbers come from the controller, so
+  // the guide stays right when the rules are tuned.
+  const guidePanel = document.querySelector('[data-panel="guide"]');
+  const guideLevels = document.querySelector('[data-guide-levels]');
+  const guideRewards = document.querySelector('[data-guide-rewards]');
+  const listFormat = new Intl.ListFormat('en', { type: 'conjunction' });
+
+  // Non-breaking spaces keep each number with its unit when a cell wraps.
+  function formatDuration(seconds) {
+    const minutes = Math.max(1, Math.round(seconds / 60));
+    if (minutes < 60) return `${minutes} min`;
+    const hours = Math.floor(minutes / 60);
+    return minutes % 60 ? `${hours} h ${minutes % 60} min` : `${hours} h`;
+  }
+
+  async function loadGuide() {
+    const guide = await api('GET', 'guide');
+    const [newcomer, ...veterans] = guide.exp_rates;
+    const values = {
+      join: guide.redeems.join,
+      daily_login: guide.redeems.daily_login,
+      first_login: guide.redeems.first_login,
+      party_size: guide.party_size,
+      voice_tiers: listFormat.format(guide.voice_tiers.map(String)),
+      exp_rates: [
+        `${newcomer.exp} per message for a new chatter`,
+        ...veterans.map((rate) => `${rate.exp} at ${rate.logins} daily logins`),
+      ].join(', '),
+      exp_cooldown: guide.exp_cooldown_seconds,
+      revive: guide.revive_levels === 1 ? '1 level' : `${guide.revive_levels} levels`,
+      tavern_idle: guide.tavern_idle_minutes,
+      sheet: guide.sheet_seconds,
+    };
+    guidePanel.querySelectorAll('[data-guide]').forEach((node) => {
+      node.textContent = values[node.dataset.guide] ?? '?';
+    });
+
+    guideLevels.replaceChildren(
+      ...guide.levels.map((row) =>
+        el(
+          'tr',
+          {},
+          el('td', {}, row.level),
+          el('td', {}, row.exp.toLocaleString()),
+          el('td', {}, row.max_hp),
+          el(
+            'td',
+            {},
+            row.level === 1
+              ? 'Where everyone starts'
+              : `${row.messages.toLocaleString()} messages, ${formatDuration(row.messages * guide.exp_cooldown_seconds)}`,
+          ),
+        ),
+      ),
+    );
+
+    guideRewards.replaceChildren(
+      ...(guide.auto_rewards.length
+        ? guide.auto_rewards.map((reward) =>
+            el(
+              'li',
+              {},
+              el('strong', {}, `${reward.cosmetic} ${reward.noun}`),
+              ` for redeeming ${reward.redeem || reward.counter} ${reward.count === 1 ? 'once' : `${reward.count} times`}.`,
+            ),
+          )
+        : [el('li', {}, 'None yet.')]),
+    );
+  }
+
   dropzone(document.querySelector('[data-sound-drop]'), stageSounds);
   dropzone(document.querySelector('[data-cosmetic-drop]'), stageCosmetics);
   loadSounds().catch(fail);
   loadCosmetics().catch(fail);
+  loadGuide().catch(fail);
 })();

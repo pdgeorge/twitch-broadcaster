@@ -110,6 +110,7 @@ Any chatter can type `!<name>` to play a sound through the overlay: `!buhee` pla
 
 - **Sounds**: drop in audio files (each becomes `!<file name>`), set cooldown and volume (saved as you leave the field), rename, swap in a better version of the file, play it on stream to check its level, delete.
 - **Cosmetics**: drop in PNGs (each becomes a cosmetic named after its file; pick its slot), replace an item's art (everyone who owns it sees the new version), move it to another slot, delete it, and add, reorder or remove slots. Uploads are checked: a PNG, the same 500×600 shape as `Dabling.png`, with a transparent background.
+- **Party guide**: a reminder of how the party game runs: the channel-point rewards, joining, exp and a level table, death and revival, and every command. Its numbers come from the controller, so it stays right when you tune them.
 
 Everything it manages lives in `data/` on the Pi (`/data` in the container), not in the git checkout, so `git pull` never trips over it. Back up `data/` along with the MySQL volume. There's no login by default since it's meant for the LAN/Tailscale; set `ADMIN_PASSWORD` in `.env` and the browser asks for it (any username).
 
@@ -128,7 +129,7 @@ Add and edit cosmetics on the admin page. The live catalog is `data/cosmetics/co
 
 ## Tests
 
-The game logic that guards persistent character state (level curve, exp/HP rules, party and tavern membership, cosmetic ownership and equip rules, DM-command authorization, chat HTML escaping) is covered by `overlay_controller/main_test.go`; sound commands (names, per-sound cooldowns, the folder scan) by `sounds_test.go`; and the admin page's guards (password, cross-site writes, upload checks, catalog edits, never deleting shipped art) by `admin_test.go`. Run `go test ./...` from `overlay_controller/`. The plumbing (websockets, RabbitMQ, MySQL, the overlay page itself) is deliberately untested: it fails loudly, the math fails silently.
+The game logic that guards persistent character state (level curve, exp/HP rules, party and tavern membership, cosmetic ownership and equip rules, DM-command authorization, chat HTML escaping) is covered by `overlay_controller/main_test.go`; sound commands (names, per-sound cooldowns, the folder scan) by `sounds_test.go`; and the admin page's guards (password, cross-site writes, upload checks, catalog edits, never deleting shipped art) and the party guide's numbers by `admin_test.go`. Run `go test ./...` from `overlay_controller/`. The plumbing (websockets, RabbitMQ, MySQL, the overlay page itself) is deliberately untested: it fails loudly, the math fails silently.
 
 ## Notes on long-running operation
 

@@ -103,6 +103,8 @@ const joinPartyRewardTitle = "join the party"
 const partyMaxSize = 4
 const expCooldownDuration = 45 * time.Second
 const chatClearWindow = 24 * time.Hour
+const reviveDefaultLevels = 1 // what !revive costs when the DM doesn't say
+const sheetDuration = 30 * time.Second
 
 func newOverlayHub() *overlayHub {
 	return &overlayHub{
@@ -384,12 +386,16 @@ func (c *character) applyExp(delta int64) {
 	newLevel := levelForExp(c.Exp)
 	leveledUp := newLevel > c.Level
 	c.Level = newLevel
-	c.MaxHP = 10 + c.Level*4
+	c.MaxHP = maxHPForLevel(c.Level)
 	if leveledUp {
 		c.HP = c.MaxHP
 	} else if c.HP > c.MaxHP {
 		c.HP = c.MaxHP
 	}
+}
+
+func maxHPForLevel(level int) int {
+	return 10 + level*4
 }
 
 // spriteVariant is the deterministic tint index for the base Dabling sprite:
@@ -2446,7 +2452,7 @@ func handleDMCommand(ctx context.Context, event map[string]any, lower, messageTe
 			reply("usage: !revive <name> [levels]")
 			return
 		}
-		cost := 1
+		cost := reviveDefaultLevels
 		if len(fields) == 3 {
 			n, err := strconv.Atoi(fields[2])
 			if err != nil || n < 0 {
@@ -2472,7 +2478,7 @@ func handleDMCommand(ctx context.Context, event map[string]any, lower, messageTe
 		}
 		c.Exp = totalExpForLevel(newLevel)
 		c.Level = newLevel
-		c.MaxHP = 10 + newLevel*4
+		c.MaxHP = maxHPForLevel(newLevel)
 		c.HP = c.MaxHP
 		c.Alive = true
 		persist(c)
@@ -2563,7 +2569,7 @@ func handleDMCommand(ctx context.Context, event map[string]any, lower, messageTe
 			"<h2>%s</h2><p>Level %d — %d/%d HP — %d exp — %d gold</p>",
 			html.EscapeString(c.Name), c.Level, c.HP, c.MaxHP, c.Exp, c.Money,
 		)
-		other.startAnnouncement(sheetHTML, 30*time.Second)
+		other.startAnnouncement(sheetHTML, sheetDuration)
 	}
 }
 

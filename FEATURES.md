@@ -11,9 +11,11 @@ A one-page summary of what this stack does on stream, what the overlay is made o
 - **Login redeems**: "daily login bonus" and "first login bonus" each keep a count per chatter, and the bot replies with the new total. A chatter's first "first login bonus" also gives them the `bronze_first` shirt, the only automatic reward so far.
 - **Custom text commands**: mods add one with `#a !discord <reply>` and remove it with `#d !discord`. Anyone who types exactly `!discord` gets the reply.
 - **Chat log**: every message is saved to MySQL (`chat_log`) permanently. Messages a mod deletes, or that a timeout or ban clears, are marked deleted but kept. This is the groundwork for Chat on Trial in `PLANS.md`.
-- **`/admin`**: `http://dabi:8080/admin`, with Sounds and Cosmetics tabs.
+- **`/admin`**: `http://dabi:8080/admin`, with Sounds, Cosmetics and Party guide tabs.
 
 ## The party game
+
+The Party guide tab on `/admin` covers all of this, with the numbers taken from the controller.
 
 - **Joining**: the "join the party" channel-point redeem, 4 seats. Party members get a card at the bottom right, and what they type in chat is read aloud in TikTok voices. Each chatter keeps the same voice, and more voices unlock at 10 and 30 daily logins.
 - **Exp and levels**: chatting earns exp, at most once every 45 seconds (5 + √logins per message). Levelling up raises max HP, refills HP and makes the Dabling bigger.
@@ -66,7 +68,6 @@ The controller also sends `tavern.possess`, `tavern.return` and `tavern.death` w
 
 ## Not built yet
 
-- A party guide on `/admin`, as a reminder of how the party game works.
 - Walk-to-door and death animations, from the `tavern.*` messages above.
 - Dablings falling asleep when their chatter goes quiet.
 - A level-up spin.

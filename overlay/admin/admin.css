@@ -517,6 +517,83 @@ section > .dropzone:first-child {
   padding-right: 8px;
 }
 
+/* Party guide: a reference sheet, how it runs on the left and the commands
+   on the right. */
+.guide {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.guide-col {
+  display: grid;
+  gap: 16px;
+}
+
+.guide-card {
+  padding: 16px 18px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.guide-card h3 {
+  margin: 0 0 8px;
+  font: 600 17px/1.2 var(--font-display);
+}
+
+.guide-card p,
+.guide-card ul,
+.guide-card table,
+.guide-card .table-wrap {
+  margin: 0 0 10px;
+}
+
+.guide-card > :last-child {
+  margin-bottom: 0;
+}
+
+.guide-card ul {
+  padding-left: 1.2em;
+}
+
+.guide-card li + li {
+  margin-top: 5px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.guide-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.guide-table th,
+.guide-table td {
+  padding: 6px 10px 6px 0;
+  text-align: left;
+  vertical-align: top;
+  border-top: 1px solid var(--line);
+}
+
+.guide-table th {
+  color: var(--muted);
+  font-weight: 600;
+  border-top: 0;
+}
+
+.guide-table tbody tr:first-child td {
+  border-top: 0;
+}
+
+.guide-table.commands td:first-child {
+  white-space: nowrap;
+}
+
 .toasts {
   position: fixed;
   right: 16px;
@@ -564,6 +641,10 @@ section > .dropzone:first-child {
   .row .actions {
     justify-content: flex-start;
   }
+
+  .guide {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 520px) {
@@ -584,6 +665,17 @@ section > .dropzone:first-child {
 
   .grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  /* Each command over its description, rather than squeezed beside it. */
+  .guide-table.commands td {
+    display: block;
+    padding-right: 0;
+  }
+
+  .guide-table.commands td + td {
+    padding-top: 0;
+    border-top: 0;
   }
 }
 
