@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Overlay admin</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="admin.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Overlay admin</h1>
+        <p class="subtitle">Sound commands and Dabling cosmetics. Every change is live on stream straight away.</p>
+      </div>
+      <nav class="tabs" role="tablist" aria-label="Sections">
+        <button type="button" role="tab" data-tab="sounds">Sounds</button>
+        <button type="button" role="tab" data-tab="cosmetics">Cosmetics</button>
+      </nav>
+    </header>
+
+    <main>
+      <section data-panel="sounds" role="tabpanel" aria-label="Sounds">
+        <label class="dropzone" data-sound-drop>
+          <input type="file" accept=".wav,.mp3,.ogg,audio/wav,audio/x-wav,audio/mpeg,audio/ogg" multiple />
+          <span class="dropzone-title">Drop sound files here, or click to choose</span>
+          <span class="hint">wav, mp3 or ogg. The file name becomes the command: buhee.wav plays on <code>!buhee</code></span>
+        </label>
+
+        <div class="staging" data-sound-staging hidden>
+          <div class="section-head">
+            <h2>Ready to add</h2>
+            <button type="button" class="btn accent" data-add-all-sounds hidden>Add all</button>
+          </div>
+          <div class="rows" data-sound-staging-list></div>
+        </div>
+
+        <div class="section-head">
+          <h2>Sounds <span class="count" data-sound-count></span></h2>
+          <p class="hint">Anyone in chat can play these. Cooldowns are shared: after a sound plays, nobody can set it off again until its cooldown runs out (0 means no cooldown). <code>!sounds</code> lists them in chat.</p>
+        </div>
+        <div class="rows" data-sound-list></div>
+      </section>
+
+      <section data-panel="cosmetics" role="tabpanel" aria-label="Cosmetics" hidden>
+        <div class="section-head">
+          <h2>Slots</h2>
+          <p class="hint">A Dabling wears one cosmetic per slot. Slots are drawn in this order: the first sits right on the body, later ones go on top of it.</p>
+        </div>
+        <ol class="slot-list" data-slot-list></ol>
+        <form class="slot-form" data-slot-form>
+          <input name="slot" placeholder="new slot, e.g. head" autocomplete="off" spellcheck="false" aria-label="New slot name" />
+          <button type="submit" class="btn">Add slot</button>
+        </form>
+
+        <label class="dropzone" data-cosmetic-drop>
+          <input type="file" accept=".png,image/png" multiple />
+          <span class="dropzone-title">Drop cosmetic PNGs here, or click to choose</span>
+          <span class="hint">Transparent PNGs drawn on Dabling's 500×600 canvas. The file name becomes the cosmetic's name.</span>
+        </label>
+
+        <div class="staging" data-cosmetic-staging hidden>
+          <div class="section-head">
+            <h2>Ready to add</h2>
+            <button type="button" class="btn accent" data-add-all-cosmetics hidden>Add all</button>
+          </div>
+          <div class="grid" data-cosmetic-staging-grid></div>
+        </div>
+
+        <div class="section-head">
+          <h2>Cosmetics <span class="count" data-cosmetic-count></span></h2>
+          <p class="hint">Hand them out in chat with <code>!give &lt;name&gt; &lt;cosmetic&gt;</code>.</p>
+        </div>
+        <div class="grid" data-cosmetic-grid></div>
+      </section>
+    </main>
+
+    <div class="toasts" data-toasts></div>
+    <script src="admin.js"></script>
+  </body>
+</html>
