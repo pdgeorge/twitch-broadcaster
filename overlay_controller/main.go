@@ -55,6 +55,8 @@ type chatFragment struct {
 
 type chatMessage struct {
 	Type         string         `json:"type"`
+	MessageID    string         `json:"message_id,omitempty"`
+	UserID       string         `json:"user_id,omitempty"`
 	Username     string         `json:"username"`
 	Message      string         `json:"message"`
 	MessageHTML  string         `json:"message_html"`
@@ -801,22 +803,35 @@ type ttsManager struct {
 	clips map[string][]byte
 	order []string
 	next  int64
+
+	// What mods have taken out of chat lately, and when, so a line still
+	// being synthesized when its message goes is dropped instead of played.
+	deleted    map[string]time.Time // by message id
+	cleared    map[string]time.Time // by user id, from a timeout or ban
+	clearedAll time.Time            // the last /clear
 }
 
 const ttsClipCacheMax = 50
+
+const ttsRequestTimeout = 30 * time.Second
+
+// ttsRemovalMemory is how long withdraw remembers a removal: longer than any
+// synthesis can take, since requests give up after ttsRequestTimeout.
+const ttsRemovalMemory = 2 * ttsRequestTimeout
 
 func newTTSManager(serviceURL string, hub *overlayHub) *ttsManager {
 	return &ttsManager{
 		serviceURL: serviceURL,
 		hub:        hub,
-		client:     &http.Client{Timeout: 30 * time.Second},
+		client:     &http.Client{Timeout: ttsRequestTimeout},
 		clips:      map[string][]byte{},
+		deleted:    map[string]time.Time{},
+		cleared:    map[string]time.Time{},
 	}
 }
 
-func (t *ttsManager) store(audio []byte) string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+// storeLocked caches a clip and returns its id. t.mu must be held.
+func (t *ttsManager) storeLocked(audio []byte) string {
 	t.next++
 	id := fmt.Sprintf("%d-%d", time.Now().Unix(), t.next)
 	t.clips[id] = audio
@@ -841,11 +856,23 @@ func (t *ttsManager) serveClip(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(audio)
 }
 
-// speak synthesizes text and broadcasts tts.play. Run it in its own
-// goroutine — synthesis latency must never block chat handling.
-func (t *ttsManager) speak(name string, logins int64, text string) {
-	voice := ttsVoiceFor(name, logins)
-	body, _ := json.Marshal(map[string]string{"text": text, "voice": voice})
+// ttsLine is one party member's chat message to read aloud, with what ties
+// it to that message, so a mod removing the message stops the line too.
+type ttsLine struct {
+	Name      string
+	Logins    int64
+	Text      string
+	MessageID string
+	UserID    string
+	At        time.Time // when the message came in
+}
+
+// speak synthesizes line and broadcasts tts.play, unless a mod has removed
+// the message in the meantime. Run it in its own goroutine — synthesis
+// latency must never block chat handling.
+func (t *ttsManager) speak(line ttsLine) {
+	voice := ttsVoiceFor(line.Name, line.Logins)
+	body, _ := json.Marshal(map[string]string{"text": line.Text, "voice": voice})
 	resp, err := t.client.Post(t.serviceURL+"/tts", "application/json", bytes.NewReader(body))
 	if err != nil {
 		log.Printf("tts: request failed: %v", err)
@@ -853,7 +880,7 @@ func (t *ttsManager) speak(name string, logins int64, text string) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("tts: service returned %s for %s (%s)", resp.Status, name, voice)
+		log.Printf("tts: service returned %s for %s (%s)", resp.Status, line.Name, voice)
 		return
 	}
 	audio, err := io.ReadAll(resp.Body)
@@ -861,14 +888,62 @@ func (t *ttsManager) speak(name string, logins int64, text string) {
 		log.Printf("tts: reading audio: %v", err)
 		return
 	}
-	id := t.store(audio)
 	duration, _ := strconv.Atoi(resp.Header.Get("X-Duration-Seconds"))
+
+	// Check and broadcast under the lock withdraw takes: a removal either
+	// lands first and stops the line here, or lands once the overlay has the
+	// line, and the overlay drops it.
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.removedLocked(line) {
+		log.Printf("tts: not reading out %s's message: a mod removed it", line.Name)
+		return
+	}
 	broadcastJSON(t.hub, map[string]any{
-		"type":     "tts.play",
-		"name":     name,
-		"url":      "/tts/" + id + ".mp3",
-		"duration": duration,
+		"type":       "tts.play",
+		"name":       line.Name,
+		"url":        "/tts/" + t.storeLocked(audio) + ".mp3",
+		"duration":   duration,
+		"message_id": line.MessageID,
+		"user_id":    line.UserID,
 	})
+}
+
+// withdraw remembers what a mod just took out of chat, so lines of it still
+// being synthesized are dropped.
+func (t *ttsManager) withdraw(removal chatRemoval, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for id, at := range t.deleted {
+		if now.Sub(at) > ttsRemovalMemory {
+			delete(t.deleted, id)
+		}
+	}
+	for id, at := range t.cleared {
+		if now.Sub(at) > ttsRemovalMemory {
+			delete(t.cleared, id)
+		}
+	}
+	switch removal.Type {
+	case "chat.delete":
+		t.deleted[removal.MessageID] = now
+	case "chat.clear_user":
+		t.cleared[removal.UserID] = now
+	case "chat.clear":
+		t.clearedAll = now
+	}
+}
+
+// removedLocked reports whether a mod has removed line's message since it
+// came in. t.mu must be held.
+func (t *ttsManager) removedLocked(line ttsLine) bool {
+	if _, ok := t.deleted[line.MessageID]; ok && line.MessageID != "" {
+		return true
+	}
+	if at, ok := t.cleared[line.UserID]; ok && line.UserID != "" && !at.Before(line.At) {
+		return true
+	}
+	return !t.clearedAll.IsZero() && !t.clearedAll.Before(line.At)
 }
 
 // speakPartyMessage TTSes a chat message if the sender's character is
@@ -886,7 +961,14 @@ func speakPartyMessage(event map[string]any, messageText string, party *partyMan
 	if c == nil {
 		return
 	}
-	go tts.speak(c.Name, c.Logins, text)
+	go tts.speak(ttsLine{
+		Name:      c.Name,
+		Logins:    c.Logins,
+		Text:      text,
+		MessageID: firstString(event["message_id"], ""),
+		UserID:    firstString(event["chatter_user_id"], ""),
+		At:        time.Now(),
+	})
 }
 
 type characterStore struct {
@@ -1150,6 +1232,44 @@ func handleChatLogEvent(ctx context.Context, eventType string, event map[string]
 	if err != nil {
 		log.Printf("chat_log: %s failed: %v", eventType, err)
 	}
+}
+
+// chatRemoval is a mod taking messages out of chat: one message (a delete),
+// everything from one chatter (a timeout or ban), or the lot (/clear). It
+// goes to the overlay as is.
+type chatRemoval struct {
+	Type      string `json:"type"` // chat.delete, chat.clear_user or chat.clear
+	MessageID string `json:"message_id,omitempty"`
+	UserID    string `json:"user_id,omitempty"`
+}
+
+// chatRemovalFor reads a moderation event, returning nil if it names
+// nothing to remove.
+func chatRemovalFor(eventType string, event map[string]any) *chatRemoval {
+	switch eventType {
+	case "channel.chat.message_delete":
+		if id := firstString(event["message_id"], ""); id != "" {
+			return &chatRemoval{Type: "chat.delete", MessageID: id}
+		}
+	case "channel.chat.clear_user_messages":
+		if id := firstString(event["target_user_id"], ""); id != "" {
+			return &chatRemoval{Type: "chat.clear_user", UserID: id}
+		}
+	case "channel.chat.clear":
+		return &chatRemoval{Type: "chat.clear"}
+	}
+	return nil
+}
+
+// removeChat takes what a mod removed off the stream: its lines in the
+// on-screen chat, and any party TTS of it that hasn't played yet.
+func removeChat(eventType string, event map[string]any, hub *overlayHub, tts *ttsManager) {
+	removal := chatRemovalFor(eventType, event)
+	if removal == nil {
+		return
+	}
+	tts.withdraw(*removal, time.Now())
+	broadcastJSON(hub, removal)
 }
 
 func (h *overlayHub) handleWS(w http.ResponseWriter, r *http.Request) {
@@ -1816,6 +1936,11 @@ func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other
 		handleChatEvent(ctx, payload.Event, hub, other, characters, party, expCooldown, botCommands, commands, tts, tavern, cosmetics, sounds)
 	case "channel.chat.message_delete", "channel.chat.clear_user_messages":
 		handleChatLogEvent(ctx, eventType, payload.Event, chatLog)
+		removeChat(eventType, payload.Event, hub, tts)
+	case "channel.chat.clear":
+		// A /clear empties the on-screen chat too, but the chat log keeps
+		// those rows unflagged: it doesn't single out anyone's messages.
+		removeChat(eventType, payload.Event, hub, tts)
 	case "channel.channel_points_custom_reward_redemption.add":
 		handleRedeemEvent(ctx, payload.Event, other, store, characters, party, commands, tavern, cosmetics)
 	default:
@@ -1841,6 +1966,8 @@ func formatChat(event map[string]any) *chatMessage {
 
 	msg := &chatMessage{
 		Type:         "chat.message",
+		MessageID:    firstString(event["message_id"], ""),
+		UserID:       firstString(event["chatter_user_id"], ""),
 		Username:     username,
 		Message:      messageText,
 		Fragments:    fragments,

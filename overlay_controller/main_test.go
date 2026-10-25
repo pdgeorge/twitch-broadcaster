@@ -8,10 +8,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -797,5 +800,143 @@ func TestShippedAutoRewards(t *testing.T) {
 		if r.Counter != loginsCounter && r.Counter != firstLoginsCounter {
 			t.Errorf("auto reward %q watches unknown counter %q", r.Cosmetic, r.Counter)
 		}
+	}
+}
+
+// broadcastsOf drains the hub and decodes every payload of type typ.
+func broadcastsOf(t *testing.T, hub *overlayHub, typ string) []map[string]any {
+	t.Helper()
+	var found []map[string]any
+	for {
+		select {
+		case data := <-hub.broadcast:
+			var payload map[string]any
+			if err := json.Unmarshal(data, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["type"] == typ {
+				found = append(found, payload)
+			}
+		default:
+			return found
+		}
+	}
+}
+
+// What a mod removes has to come off the stream: a delete by message, a
+// timeout or ban by chatter, /clear everything.
+func TestChatRemovalFor(t *testing.T) {
+	cases := []struct {
+		name      string
+		eventType string
+		event     map[string]any
+		want      *chatRemoval
+	}{
+		{"delete", "channel.chat.message_delete", map[string]any{"message_id": "m1", "target_user_id": "7"}, &chatRemoval{Type: "chat.delete", MessageID: "m1"}},
+		{"timeout or ban", "channel.chat.clear_user_messages", map[string]any{"target_user_id": "7"}, &chatRemoval{Type: "chat.clear_user", UserID: "7"}},
+		{"clear", "channel.chat.clear", map[string]any{"broadcaster_user_id": "42"}, &chatRemoval{Type: "chat.clear"}},
+		{"delete without an id", "channel.chat.message_delete", map[string]any{}, nil},
+		{"timeout without an id", "channel.chat.clear_user_messages", map[string]any{"target_user_id": ""}, nil},
+		{"not moderation", "channel.chat.message", map[string]any{"message_id": "m1"}, nil},
+	}
+	for _, tc := range cases {
+		got := chatRemovalFor(tc.eventType, tc.event)
+		if (got == nil) != (tc.want == nil) || (got != nil && *got != *tc.want) {
+			t.Errorf("%s: got %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The overlay finds the lines to remove by these ids.
+func TestFormatChatCarriesIDs(t *testing.T) {
+	msg := formatChat(map[string]any{
+		"message_id":      "m1",
+		"chatter_user_id": "7",
+		"message":         map[string]any{"text": "hi"},
+	})
+	if msg == nil || msg.MessageID != "m1" || msg.UserID != "7" {
+		t.Fatalf("formatChat = %+v, want message m1 from user 7", msg)
+	}
+}
+
+func TestTTSRemovals(t *testing.T) {
+	sent := time.Now()
+	line := ttsLine{Name: "Hez", Text: "hi", MessageID: "m1", UserID: "7", At: sent}
+	cases := []struct {
+		name    string
+		removal chatRemoval
+		at      time.Time
+		want    bool
+	}{
+		{"its message deleted", chatRemoval{Type: "chat.delete", MessageID: "m1"}, sent.Add(time.Second), true},
+		{"another message deleted", chatRemoval{Type: "chat.delete", MessageID: "m2"}, sent.Add(time.Second), false},
+		{"its sender timed out after", chatRemoval{Type: "chat.clear_user", UserID: "7"}, sent.Add(time.Second), true},
+		// Back from a timeout that was over before they said it.
+		{"its sender timed out before", chatRemoval{Type: "chat.clear_user", UserID: "7"}, sent.Add(-time.Second), false},
+		{"someone else timed out", chatRemoval{Type: "chat.clear_user", UserID: "8"}, sent.Add(time.Second), false},
+		{"chat cleared after", chatRemoval{Type: "chat.clear"}, sent.Add(time.Second), true},
+		{"chat cleared before", chatRemoval{Type: "chat.clear"}, sent.Add(-time.Second), false},
+	}
+	for _, tc := range cases {
+		tts := newTTSManager("", newOverlayHub())
+		tts.withdraw(tc.removal, tc.at)
+		if got := tts.removedLocked(line); got != tc.want {
+			t.Errorf("%s: removed = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+
+	t.Run("nothing removed", func(t *testing.T) {
+		if newTTSManager("", newOverlayHub()).removedLocked(line) {
+			t.Error("a fresh manager drops lines")
+		}
+	})
+
+	t.Run("old removals are forgotten", func(t *testing.T) {
+		tts := newTTSManager("", newOverlayHub())
+		tts.withdraw(chatRemoval{Type: "chat.delete", MessageID: "m1"}, sent)
+		tts.withdraw(chatRemoval{Type: "chat.clear_user", UserID: "7"}, sent)
+		tts.withdraw(chatRemoval{Type: "chat.delete", MessageID: "m9"}, sent.Add(ttsRemovalMemory+time.Second))
+		if _, ok := tts.deleted["m1"]; ok {
+			t.Error("kept an old delete")
+		}
+		if _, ok := tts.cleared["7"]; ok {
+			t.Error("kept an old timeout")
+		}
+	})
+}
+
+// A line still being synthesized when a mod removes its message never
+// reaches the overlay. The rest still play, carrying the ids the overlay
+// needs to drop them later.
+func TestTTSSkipsRemovedMessages(t *testing.T) {
+	release := make(chan struct{})
+	service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		w.Header().Set("X-Duration-Seconds", "2")
+		_, _ = w.Write([]byte("mp3"))
+	}))
+	defer service.Close()
+
+	hub := newOverlayHub()
+	tts := newTTSManager(service.URL, hub)
+	sent := time.Now()
+	var wg sync.WaitGroup
+	for _, line := range []ttsLine{
+		{Name: "Hez", Text: "hello", MessageID: "m1", UserID: "7", At: sent},
+		{Name: "Hez", Text: "something rude", MessageID: "m2", UserID: "7", At: sent},
+	} {
+		wg.Add(1)
+		go func(line ttsLine) {
+			defer wg.Done()
+			tts.speak(line)
+		}(line)
+	}
+	tts.withdraw(chatRemoval{Type: "chat.delete", MessageID: "m2"}, time.Now())
+	close(release)
+	wg.Wait()
+
+	played := broadcastsOf(t, hub, "tts.play")
+	if len(played) != 1 || played[0]["message_id"] != "m1" || played[0]["user_id"] != "7" {
+		t.Fatalf("tts.play broadcasts = %v, want only m1 from user 7", played)
 	}
 }

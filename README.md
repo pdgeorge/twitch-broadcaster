@@ -79,6 +79,7 @@ An overlay controller service streams `channel.chat.message` events to browser c
 - When running via Docker Compose, the overlay is available at `http://localhost:${OVERLAY_HTTP_PORT}`. Add this URL as a browser source in OBS with a transparent background.
 - Twitch emotes are expanded server-side; the overlay page also auto-loads BTTV/FFZ/7TV global + channel emotes for richer chat rendering.
 - Every chat message is also saved to the `chat_log` MySQL table. Messages a mod deletes, or that a timeout/ban clears, are kept but flagged `deleted = TRUE`.
+- Moderation reaches the stream too: when a mod deletes a message, times out or bans a chatter, or clears chat, those lines come off the on-screen chat, and any party TTS of them that hasn't finished is dropped, or cut off if it's playing. A `/clear` leaves the chat log unflagged, since it doesn't single anyone out.
 - Environment variables for the overlay controller: `RABBITMQ_URL`, `RABBITMQ_EXCHANGE`, `OVERLAY_QUEUE`, `OVERLAY_HTTP_PORT`, `OVERLAY_STATIC_DIR`, `OVERLAY_DATA_DIR`, `ADMIN_PASSWORD`.
 
 ### Overlay geometry (1920×1080 canvas, all set in `overlay/overlay.css`)
@@ -129,7 +130,7 @@ Add and edit cosmetics on the admin page. The live catalog is `data/cosmetics/co
 
 ## Tests
 
-The game logic that guards persistent character state (level curve, exp/HP rules, party and tavern membership, cosmetic ownership and equip rules, DM-command authorization, chat HTML escaping) is covered by `overlay_controller/main_test.go`; sound commands (names, per-sound cooldowns, the folder scan) by `sounds_test.go`; and the admin page's guards (password, cross-site writes, upload checks, catalog edits, never deleting shipped art) and the party guide's numbers by `admin_test.go`. Run `go test ./...` from `overlay_controller/`. The plumbing (websockets, RabbitMQ, MySQL, the overlay page itself) is deliberately untested: it fails loudly, the math fails silently.
+The game logic that guards persistent character state (level curve, exp/HP rules, party and tavern membership, cosmetic ownership and equip rules, DM-command authorization, chat HTML escaping, moderation taking messages off the chat and party TTS) is covered by `overlay_controller/main_test.go`; sound commands (names, per-sound cooldowns, the folder scan) by `sounds_test.go`; and the admin page's guards (password, cross-site writes, upload checks, catalog edits, never deleting shipped art) and the party guide's numbers by `admin_test.go`. Run `go test ./...` from `overlay_controller/`. The plumbing (websockets, RabbitMQ, MySQL, the overlay page itself) is deliberately untested: it fails loudly, the math fails silently.
 
 ## Notes on long-running operation
 

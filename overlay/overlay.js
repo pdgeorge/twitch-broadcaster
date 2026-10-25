@@ -209,19 +209,48 @@
   }
 
   const ttsQueue = [];
-  let ttsPlaying = false;
+  let ttsPlaying = null; // { clip, audio } while a clip plays
 
   function playNextTTS() {
     const next = ttsQueue.shift();
     if (!next) {
-      ttsPlaying = false;
+      ttsPlaying = null;
       return;
     }
-    ttsPlaying = true;
-    const audio = new Audio(next.url);
-    audio.onended = playNextTTS;
-    audio.onerror = playNextTTS;
-    audio.play().catch(playNextTTS);
+    const current = { clip: next, audio: new Audio(next.url) };
+    ttsPlaying = current;
+    // Only the clip that's still current moves the queue on, so a clip cut
+    // off by a mod, or one that errors twice over, can't skip the next one.
+    let watchdog = null;
+    const done = () => {
+      clearTimeout(watchdog);
+      if (ttsPlaying === current) playNextTTS();
+    };
+    current.audio.onended = done;
+    current.audio.onerror = done;
+    // Chromium can reject play() with an AbortError for audio that isn't in
+    // the page and then play it anyway, so that isn't taken as the end. The
+    // watchdog makes sure no clip holds up the queue for good.
+    current.audio.play().catch((err) => {
+      if (err.name !== 'AbortError') done();
+    });
+    watchdog = setTimeout(done, ((next.duration || 30) + 5) * 1000);
+  }
+
+  // A clip goes when a mod removes its message: deleted, its sender timed
+  // out or banned, or chat cleared. One that's playing is cut off.
+  function dropTTS(removal) {
+    const removed = (clip) =>
+      removal.type === 'chat.clear' ||
+      (removal.type === 'chat.delete' && clip.message_id === removal.message_id) ||
+      (removal.type === 'chat.clear_user' && clip.user_id === removal.user_id);
+    for (let i = ttsQueue.length - 1; i >= 0; i--) {
+      if (removed(ttsQueue[i])) ttsQueue.splice(i, 1);
+    }
+    if (ttsPlaying && removed(ttsPlaying.clip)) {
+      ttsPlaying.audio.pause();
+      playNextTTS();
+    }
   }
 
   // Sound commands (!buhee etc.) play straight away, over TTS or each other;
@@ -247,15 +276,41 @@
       .replace(/'/g, '&#39;');
   }
 
-  function appendChatLine(html) {
+  function appendChatLine(html, payload) {
     const line = document.createElement('div');
     line.className = 'chat-line';
+    line.dataset.messageId = payload.message_id || '';
+    line.dataset.userId = payload.user_id || '';
     line.innerHTML = html;
     if (chatBox.firstChild) {
       chatBox.insertBefore(line, chatBox.firstChild);
     } else {
       chatBox.appendChild(line);
     }
+  }
+
+  // A mod's delete takes its line off screen, a timeout or ban takes all of
+  // that chatter's lines, and /clear takes the lot.
+  function removeChatLines(removal) {
+    if (removal.type === 'chat.clear') {
+      chatBox.replaceChildren();
+      return;
+    }
+    const [key, value] = removal.type === 'chat.delete'
+      ? ['messageId', removal.message_id]
+      : ['userId', removal.user_id];
+    if (!value) return;
+    chatBox.querySelectorAll('.chat-line').forEach((line) => {
+      if (line.dataset[key] === value) line.remove();
+    });
+  }
+
+  // Chat lines and removals take turns in arrival order, so a removal can't
+  // overtake the line it removes while that line waits on emotes. Emotes
+  // still load as each message arrives; only the drawing waits its turn.
+  let chatTurn = Promise.resolve();
+  function inChatOrder(task) {
+    chatTurn = chatTurn.then(task).catch((err) => console.error('chat update failed', err));
   }
 
   function setOtherContent(html) {
@@ -445,8 +500,17 @@
       try {
         const payload = JSON.parse(event.data);
         if (payload.type === 'chat.message') {
-          await ensureChannelEmotes(payload.channel_id);
-          appendChatLine(renderMessage(payload));
+          const emotes = ensureChannelEmotes(payload.channel_id);
+          inChatOrder(async () => {
+            await emotes;
+            appendChatLine(renderMessage(payload), payload);
+          });
+          return;
+        }
+
+        if (payload.type === 'chat.delete' || payload.type === 'chat.clear_user' || payload.type === 'chat.clear') {
+          dropTTS(payload);
+          inChatOrder(() => removeChatLines(payload));
           return;
         }
 
