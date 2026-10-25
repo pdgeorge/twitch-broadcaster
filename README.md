@@ -2,6 +2,8 @@
 
 This repository defines a Twitch EventSub receiver that republishes channel events to RabbitMQ so they can be consumed by any downstream service. A helper `desktop_tools/background.py` example shows how to listen for events and print them to the terminal.
 
+For a one-page summary of what's on stream, the overlay's pieces and the known issues, see `FEATURES.md`.
+
 ## Prerequisites
 
 - Docker and Docker Compose
@@ -88,7 +90,6 @@ An overlay controller service streams `channel.chat.message` events to browser c
 
 ### Chat commands
 
-- **`ping`** (any chatter): starts a brief Pong animation in the lower “other” box for about a minute.
 - **`!other <text>`** (broadcaster/moderators): replaces the lower box with your message. Basic Markdown is rendered (e.g., `*italic*`, `**bold**`, lists, headings).
 - **Channel point reward titled “announcement”**: when redeemed, the lower box shows the submitted text (Markdown supported) for five minutes.
 - **Channel point rewards titled “daily login bonus” and “first login bonus”**: each redeem adds one to that chatter's count (`logins` / `first_logins` in the `chatters` table) and the bot replies in chat with the new total, e.g. “@name you've logged in first 3 times!”.
