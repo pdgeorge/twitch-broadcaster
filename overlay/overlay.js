@@ -225,6 +225,14 @@
     audio.play().catch(playNextTTS);
   }
 
+  // Sound commands (!buhee etc.) play straight away, over TTS or each other;
+  // the controller's per-sound cooldown is what stops chat spamming them.
+  function playSound(payload) {
+    const audio = new Audio(payload.url);
+    audio.volume = Math.max(0, Math.min(1, payload.volume ?? 1));
+    audio.play().catch((err) => console.warn('sound failed', payload.name, err));
+  }
+
   const emoteStores = {
     bttv: { global: new Map(), channels: new Map(), globalLoaded: false },
     ffz: { global: new Map(), channels: new Map(), globalLoaded: false },
@@ -481,6 +489,10 @@
         if (payload.type === 'tts.play') {
           ttsQueue.push(payload);
           if (!ttsPlaying) playNextTTS();
+        }
+
+        if (payload.type === 'sound.play') {
+          playSound(payload);
         }
 
         if (payload.type === 'roll.result') {

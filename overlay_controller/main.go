@@ -10,6 +10,7 @@ import (
 	"hash/fnv"
 	"html"
 	"io"
+	"io/fs"
 	"log"
 	"maps"
 	"math"
@@ -39,8 +40,10 @@ type config struct {
 	queueName       string
 	httpPort        string
 	staticDir       string
+	dataDir         string
 	mysqlDSN        string
 	ttsServiceURL   string
+	adminPassword   string
 }
 
 type chatFragment struct {
@@ -581,9 +584,9 @@ func (cat *cosmeticCatalog) wardrobeSummary(c *character) string {
 }
 
 // cosmeticCatalogStore serves the catalog from disk, re-reading it whenever
-// the file's mtime changes so items can be added mid-stream (drop in a PNG,
-// add a line) without a restart. A broken edit is logged and the last good
-// catalog stays in use.
+// the file's mtime changes so items can be added mid-stream without a
+// restart, whether through /admin or by hand. A broken hand edit is logged and
+// the last good catalog stays in use.
 type cosmeticCatalogStore struct {
 	path    string
 	mu      sync.Mutex
@@ -603,32 +606,90 @@ func (s *cosmeticCatalogStore) get() *cosmeticCatalog {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.refreshLocked()
+	return s.catalog
+}
+
+func (s *cosmeticCatalogStore) refreshLocked() {
 	info, err := os.Stat(s.path)
 	if err != nil {
 		if !s.warned {
 			log.Printf("cosmetics: can't read catalog: %v", err)
 			s.warned = true
 		}
-		return s.catalog
+		return
 	}
 	s.warned = false
 	if info.ModTime().Equal(s.modTime) {
-		return s.catalog
+		return
 	}
 	s.modTime = info.ModTime()
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		log.Printf("cosmetics: can't read catalog: %v", err)
-		return s.catalog
+		return
 	}
 	cat, err := parseCosmeticCatalog(data)
 	if err != nil {
 		log.Printf("cosmetics: ignoring bad catalog %s, keeping the last good one: %v", s.path, err)
-		return s.catalog
+		return
 	}
 	s.catalog = cat
 	log.Printf("cosmetics: loaded %d items from %s", len(cat.Items), s.path)
-	return s.catalog
+}
+
+// update applies change to a copy of the catalog and saves the result, held
+// to the same rules as a hand edit and written atomically so the reloader
+// never sees half a file. The catalog get hands out is never modified in
+// place, so readers holding it are unaffected.
+func (s *cosmeticCatalogStore) update(change func(cat *cosmeticCatalog) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refreshLocked() // build on any hand edit made since the last read
+	next := &cosmeticCatalog{Slots: slices.Clone(s.catalog.Slots), Items: maps.Clone(s.catalog.Items)}
+	if next.Items == nil {
+		next.Items = map[string]cosmeticItem{}
+	}
+	if err := change(next); err != nil {
+		return err
+	}
+	if next.Slots == nil {
+		next.Slots = []string{}
+	}
+	data, err := json.MarshalIndent(next, "", "  ")
+	if err != nil {
+		return err
+	}
+	if _, err := parseCosmeticCatalog(data); err != nil {
+		return badRequest("%v", err)
+	}
+	if err := writeFileAtomic(s.path, append(data, '\n')); err != nil {
+		return err
+	}
+	if info, err := os.Stat(s.path); err == nil {
+		s.modTime = info.ModTime()
+	}
+	s.catalog = next
+	return nil
+}
+
+// seedCosmeticCatalog gives a fresh data dir its live catalog: a copy of the
+// starter one in the repo. From then on the copy is the catalog (it's what
+// /admin edits), so the git checkout on the Pi never picks up local changes.
+// The starter items' images stay where they ship, in overlay/assets.
+func seedCosmeticCatalog(shipped, live string) error {
+	if _, err := os.Stat(live); err == nil || !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	data, err := os.ReadFile(shipped)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(live), 0o755); err != nil {
+		return err
+	}
+	log.Printf("cosmetics: first run, copying the starter catalog to %s", live)
+	return writeFileAtomic(live, data)
 }
 
 // ttsVoiceTiers gate the voice pool by login count (design doc §9): everyone
@@ -1493,6 +1554,14 @@ func (t *tavernManager) refresh(c *character) {
 	}
 }
 
+// redraw re-sends the roster unchanged, for when what it draws from (the
+// cosmetic catalog) changes underneath it.
+func (t *tavernManager) redraw() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.broadcastLocked()
+}
+
 func (t *tavernManager) remove(name string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -1612,7 +1681,21 @@ func main() {
 	commandPublisher := newCommandPublisher(cfg)
 	defer commandPublisher.close()
 
-	cosmetics := newCosmeticCatalogStore(filepath.Join(cfg.staticDir, "assets", "cosmetics", "cosmetics.json"))
+	// Everything /admin manages lives in the data dir (data/ on the Pi), not
+	// the read-only overlay mount: sounds, uploaded cosmetic art, and the live
+	// cosmetic catalog, seeded from the repo's starter one on first run.
+	soundsDir := filepath.Join(cfg.dataDir, "sounds")
+	cosmeticsDir := filepath.Join(cfg.dataDir, "cosmetics")
+	if err := os.MkdirAll(soundsDir, 0o755); err != nil {
+		log.Printf("sounds: can't create %s: %v", soundsDir, err)
+	}
+	catalogPath := filepath.Join(cosmeticsDir, "cosmetics.json")
+	starterCatalog := filepath.Join(cfg.staticDir, "assets", "cosmetics", "cosmetics.json")
+	if err := seedCosmeticCatalog(starterCatalog, catalogPath); err != nil {
+		log.Printf("cosmetics: can't set up %s, falling back to the starter catalog (read-only): %v", catalogPath, err)
+		catalogPath = starterCatalog
+	}
+	cosmetics := newCosmeticCatalogStore(catalogPath)
 	cosmetics.get() // load now so a bad catalog shows up in the startup log
 
 	hub := newOverlayHub()
@@ -1621,18 +1704,36 @@ func main() {
 	expCooldown := newExpCooldownTracker()
 	tts := newTTSManager(cfg.ttsServiceURL, hub)
 	tavern := newTavernManager(hub, cosmetics)
+	sounds := newSoundBoard(soundsDir, hub)
 	go hub.run(ctx)
 	go startPongTicker(ctx, other)
 	go tavern.run(ctx)
 	go func() {
-		if err := consumeChat(ctx, cfg, hub, other, store, characters, party, expCooldown, botCommands, chatLog, commandPublisher, tts, tavern, cosmetics); err != nil {
+		if err := consumeChat(ctx, cfg, hub, other, store, characters, party, expCooldown, botCommands, chatLog, commandPublisher, tts, tavern, cosmetics, sounds); err != nil {
 			log.Fatalf("rabbitmq consumer stopped: %v", err)
 		}
 	}()
 
+	if cfg.adminPassword == "" {
+		log.Print("admin: /admin has no password; set ADMIN_PASSWORD to require one")
+	}
+	admin := &adminServer{
+		password:     cfg.adminPassword,
+		static:       http.FileServer(http.Dir(cfg.staticDir)),
+		sounds:       sounds,
+		cosmetics:    cosmetics,
+		cosmeticsDir: cosmeticsDir,
+		botCommands:  botCommands,
+		party:        party,
+		tavern:       tavern,
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws/overlay", hub.handleWS)
 	mux.HandleFunc("/tts/", tts.serveClip)
+	mux.Handle("/admin/", admin)
+	mux.Handle("/sounds/", http.StripPrefix("/sounds/", serveMedia(soundsDir, soundExts...)))
+	mux.Handle("/cosmetics/", http.StripPrefix("/cosmetics/", serveMedia(cosmeticsDir, ".png")))
 	mux.Handle("/", http.FileServer(http.Dir(cfg.staticDir)))
 
 	srv := &http.Server{Addr: ":" + cfg.httpPort, Handler: mux}
@@ -1659,8 +1760,10 @@ func loadConfig() config {
 		queueName:       env("OVERLAY_QUEUE", "overlay_chat"),
 		httpPort:        env("OVERLAY_HTTP_PORT", "8080"),
 		staticDir:       env("OVERLAY_STATIC_DIR", "./overlay"),
+		dataDir:         env("OVERLAY_DATA_DIR", "./data"),
 		mysqlDSN:        env("MYSQL_DSN", "echoes:echoespw@tcp(mysql:3306)/echoes?parseTime=true"),
 		ttsServiceURL:   env("TTS_SERVICE_URL", "http://tts_service:8081"),
+		adminPassword:   os.Getenv("ADMIN_PASSWORD"),
 	}
 }
 
@@ -1671,7 +1774,7 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, chatLog *chatLogStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager, cosmetics *cosmeticCatalogStore) error {
+func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, chatLog *chatLogStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager, cosmetics *cosmeticCatalogStore, sounds *soundBoard) error {
 	const minBackoff = 2 * time.Second
 	const maxBackoff = 60 * time.Second
 	backoff := minBackoff
@@ -1769,7 +1872,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 					consumeLoop = false
 					break
 				}
-				handleDelivery(ctx, d, hub, other, store, characters, party, expCooldown, botCommands, chatLog, commands, tts, tavern, cosmetics)
+				handleDelivery(ctx, d, hub, other, store, characters, party, expCooldown, botCommands, chatLog, commands, tts, tavern, cosmetics, sounds)
 			case <-reconnect:
 				consumeLoop = false
 			case <-ctx.Done():
@@ -1787,7 +1890,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 	}
 }
 
-func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, chatLog *chatLogStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager, cosmetics *cosmeticCatalogStore) {
+func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, chatLog *chatLogStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager, cosmetics *cosmeticCatalogStore, sounds *soundBoard) {
 	defer d.Ack(false)
 
 	var payload eventPayload
@@ -1804,7 +1907,7 @@ func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other
 	switch eventType {
 	case "channel.chat.message":
 		handleChatLogEvent(ctx, eventType, payload.Event, chatLog)
-		handleChatEvent(ctx, payload.Event, hub, other, characters, party, expCooldown, botCommands, commands, tts, tavern, cosmetics)
+		handleChatEvent(ctx, payload.Event, hub, other, characters, party, expCooldown, botCommands, commands, tts, tavern, cosmetics, sounds)
 	case "channel.chat.message_delete", "channel.chat.clear_user_messages":
 		handleChatLogEvent(ctx, eventType, payload.Event, chatLog)
 	case "channel.channel_points_custom_reward_redemption.add":
@@ -1963,7 +2066,7 @@ func normalizeMarkdownInput(input string) string {
 	return normalized
 }
 
-func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub, other *otherManager, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager, cosmetics *cosmeticCatalogStore) {
+func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub, other *otherManager, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager, cosmetics *cosmeticCatalogStore, sounds *soundBoard) {
 	if event == nil {
 		return
 	}
@@ -1985,6 +2088,10 @@ func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub,
 
 	if cmd, _, _ := strings.Cut(lower, " "); cmd == "!wardrobe" || cmd == "!equip" || cmd == "!unequip" {
 		handleCosmeticCommand(ctx, event, messageText, characters, party, tavern, cosmetics, commands)
+	}
+
+	if lower == "!sounds" {
+		handleSoundsCommand(ctx, event, sounds, commands)
 	}
 
 	if isAuthorizedForOther(event) {
@@ -2068,6 +2175,11 @@ func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub,
 				cancel()
 			}
 		}
+
+		// Sound commands (any chatter) go by the first word, so
+		// "!buhee lol" plays !buhee too.
+		chatter := firstString(event["chatter_user_login"], event["chatter_user_name"], "")
+		sounds.trigger(strings.TrimPrefix(strings.Fields(lower)[0], "!"), chatter, time.Now())
 	}
 
 	msg := formatChat(event)

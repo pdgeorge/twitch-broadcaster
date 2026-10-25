@@ -54,6 +54,7 @@ services:
       OVERLAY_QUEUE: ${OVERLAY_QUEUE:-overlay_chat}
       OVERLAY_HTTP_PORT: ${OVERLAY_HTTP_PORT:-8080}
       OVERLAY_STATIC_DIR: /app/overlay
+      OVERLAY_DATA_DIR: /data
       TTS_SERVICE_URL: http://tts_service:8081
     volumes:
       - ./overlay:/app/overlay:ro

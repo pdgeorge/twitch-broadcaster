@@ -9,6 +9,7 @@ The overlay controller streams Twitch chat messages from RabbitMQ to a browser o
 cd overlay_controller
 OVERLAY_HTTP_PORT=8080 \
 OVERLAY_STATIC_DIR=../overlay \
+OVERLAY_DATA_DIR=../data \
 RABBITMQ_URL=amqp://guest:guest@localhost:5672/ \
 RABBITMQ_EXCHANGE=twitch_events \
 OVERLAY_QUEUE=overlay_chat \
@@ -17,6 +18,7 @@ go run ./...
 
 - The server hosts the overlay assets from `OVERLAY_STATIC_DIR` and serves them at `/`.
 - WebSocket clients connect to `/ws/overlay` and receive JSON messages for `chat.message`.
+- The admin page (`/admin`, with its JSON API under `/admin/api/`) manages sound commands and the cosmetic catalog. What it manages lives in `OVERLAY_DATA_DIR`: sounds in `sounds/` (served at `/sounds/`), uploaded cosmetic art and the live catalog in `cosmetics/` (served at `/cosmetics/`).
 
 ## Configuration
 
@@ -25,6 +27,8 @@ go run ./...
 - `OVERLAY_QUEUE` (default `overlay_chat`)
 - `OVERLAY_HTTP_PORT` (default `8080`)
 - `OVERLAY_STATIC_DIR` (default `./overlay`)
+- `OVERLAY_DATA_DIR` (default `./data`; `/data` in Docker): where sounds, uploaded cosmetic art and the live cosmetic catalog are kept
+- `ADMIN_PASSWORD` (optional): when set, `/admin` asks for it via basic auth (any username)
 - `LOGIN_DB_PATH` (default `/data/login_counts.db`)
 - `TOKEN_CACHE_PATH` (default `/data/tokens.json`)
 - `CLIENT_ID` (your Twitch application client ID)

@@ -35,7 +35,7 @@ RABBITMQ_EXCHANGE=twitch_events
    - `twitch_broadcaster` is a RabbitMQ broker with the management UI exposed on port `15672`.
    - `twitch-receiver` connects to Twitch EventSub over WebSockets, subscribes to all channel events for `CHANNEL_ID`, and publishes them to the `twitch_events` exchange in RabbitMQ.
    - A named Docker volume (`tokens`) is mounted at `/data` inside `twitch-receiver` so refreshed tokens persist across restarts.
-   - `overlay_controller` consumes chat messages from RabbitMQ, serves the overlay assets from `overlay/`, and exposes a WebSocket endpoint at `/ws/overlay` for the overlay page.
+   - `overlay_controller` consumes chat messages from RabbitMQ, serves the overlay assets from `overlay/`, and exposes a WebSocket endpoint at `/ws/overlay` for the overlay page. It also serves the admin page at `/admin` and keeps what that manages (sounds, cosmetic art, the live cosmetic catalog) in `./data`, mounted at `/data`.
 
 2. (Optional) Tail the receiver logs:
    ```
@@ -77,7 +77,7 @@ An overlay controller service streams `channel.chat.message` events to browser c
 - When running via Docker Compose, the overlay is available at `http://localhost:${OVERLAY_HTTP_PORT}`. Add this URL as a browser source in OBS with a transparent background.
 - Twitch emotes are expanded server-side; the overlay page also auto-loads BTTV/FFZ/7TV global + channel emotes for richer chat rendering.
 - Every chat message is also saved to the `chat_log` MySQL table. Messages a mod deletes, or that a timeout/ban clears, are kept but flagged `deleted = TRUE`.
-- Environment variables for the overlay controller: `RABBITMQ_URL`, `RABBITMQ_EXCHANGE`, `OVERLAY_QUEUE`, `OVERLAY_HTTP_PORT`, `OVERLAY_STATIC_DIR`.
+- Environment variables for the overlay controller: `RABBITMQ_URL`, `RABBITMQ_EXCHANGE`, `OVERLAY_QUEUE`, `OVERLAY_HTTP_PORT`, `OVERLAY_STATIC_DIR`, `OVERLAY_DATA_DIR`, `ADMIN_PASSWORD`.
 
 ### Overlay geometry (1920×1080 canvas, all set in `overlay/overlay.css`)
 
@@ -94,6 +94,24 @@ An overlay controller service streams `channel.chat.message` events to browser c
 - **Channel point rewards titled “daily login bonus” and “first login bonus”**: each redeem adds one to that chatter's count (`logins` / `first_logins` in the `chatters` table) and the bot replies in chat with the new total, e.g. “@name you've logged in first 3 times!”.
 - **`!fire`** (broadcaster/moderators): clears any active announcement early and restores the last `!other` content.
 
+### Sound commands
+
+Any chatter can type `!<name>` to play a sound through the overlay: `!buhee` plays `buhee.wav`. Only the first word counts, so `!buhee lol` plays it too. **`!sounds`** (any chatter) lists them all in chat.
+
+- Each sound has its own cooldown, shared by everyone: once `!buhee` plays, nobody can set it off again until its cooldown runs out (5 seconds unless you change it, 0 for none). Attempts during the cooldown are ignored without a reply.
+- Each sound has a volume (0–100%), applied in the browser source. Sounds play straight away and can overlap each other and party TTS.
+- The sounds are the files in `data/sounds/` (wav, mp3 or ogg; the file name is the command), with their settings in `data/sounds/sounds.json`. Manage them from the admin page. A file copied in by hand works too, on the default settings, since the folder is read fresh on every command.
+- Names that a built-in command (`!roll`, `!give`, `!dabi`, …) or a `#a` command already answers can't be used.
+
+### Admin page (`/admin`)
+
+`http://dabi:8080/admin` manages sounds and cosmetics from a browser. Every change is live on stream straight away, with no restart.
+
+- **Sounds**: drop in audio files (each becomes `!<file name>`), set cooldown and volume (saved as you leave the field), rename, swap in a better version of the file, play it on stream to check its level, delete.
+- **Cosmetics**: drop in PNGs (each becomes a cosmetic named after its file; pick its slot), replace an item's art (everyone who owns it sees the new version), move it to another slot, delete it, and add, reorder or remove slots. Uploads are checked: a PNG, the same 500×600 shape as `Dabling.png`, with a transparent background.
+
+Everything it manages lives in `data/` on the Pi (`/data` in the container), not in the git checkout, so `git pull` never trips over it. Back up `data/` along with the MySQL volume. There's no login by default since it's meant for the LAN/Tailscale; set `ADMIN_PASSWORD` in `.env` and the browser asks for it (any username).
+
 ### Cosmetics (Dabling outfits)
 
 Chatters can own several cosmetics and pick which ones their Dabling wears, one per slot (e.g. one shirt at a time). Worn items show on the tavern floor and on party cards; the Dabling's hue tint still applies to the body, never to the cosmetic.
@@ -103,13 +121,13 @@ Chatters can own several cosmetics and pick which ones their Dabling wears, one 
 - **`!wardrobe`** (any chatter): lists what you own and what you're wearing.
 - **`!equip <cosmetic>`** / **`!unequip <cosmetic or slot>`** (any chatter): change your own outfit.
 
-The catalog is `overlay/assets/cosmetics/cosmetics.json`: `slots` sets the draw order (first is drawn lowest), and each item names its slot and its image. Every image is a transparent PNG on the same 500×600 canvas as `overlay/assets/Dabling.png`, drawn in place over the body, so it lines up at any size. To add one, drop the PNG in `overlay/assets/cosmetics/` and add a line to the catalog. The controller re-reads the file when it changes, so no restart is needed. A broken edit is logged and the previous catalog stays in use. Sprites are mirrored when a Dabling walks left, so any lettering on a cosmetic will read backwards half the time. `shirtA`/`shirtB`/`shirtC` are placeholder art.
+Add and edit cosmetics on the admin page. The live catalog is `data/cosmetics/cosmetics.json`: on first start it's copied from the starter catalog in the repo (`overlay/assets/cosmetics/cosmetics.json`), and from then on the repo copy is only used to set up a fresh `data/`. `slots` sets the draw order (first is drawn lowest), and each item names its slot and its image. Every image is a transparent PNG on the same 500×600 canvas as `overlay/assets/Dabling.png`, drawn in place over the body, so it lines up at any size. Uploaded images are stored in `data/cosmetics/` (served at `/cosmetics/`); the starter ones stay in `overlay/assets/cosmetics/`. Hand edits to the live catalog still work: the controller re-reads it when it changes, and a broken edit is logged while the previous catalog stays in use. Sprites are mirrored when a Dabling walks left, so any lettering on a cosmetic will read backwards half the time. `shirtA`/`shirtB`/`shirtC` are placeholder art.
 
 **Automatic rewards.** Some items are handed out on their own when a chatter's counter reaches a milestone. Redeeming “first login bonus” for the first time grants `bronze_first` (a bronze shirt with a “1” medallion, drawn by `python3 tools/gen_bronze_first.py`), and the bot announces “@name you have received the bronze_first shirt!”. As with `!give`, the item is put on only if that slot is empty. Each reward lands once: an owned item is never re-granted. To add another, draw the item, add it to the catalog, and add a line to `autoRewards` in `overlay_controller/main.go` naming the counter (`logins` or `first_logins`), the count it unlocks at, the item, and what the announcement calls it. A test checks that every reward's item is in the shipped catalog.
 
 ## Tests
 
-The game logic that guards persistent character state (level curve, exp/HP rules, party and tavern membership, cosmetic ownership and equip rules, DM-command authorization, chat HTML escaping) is covered by `overlay_controller/main_test.go` — run `go test ./...` from `overlay_controller/`. The plumbing (websockets, RabbitMQ, MySQL, the overlay page itself) is deliberately untested: it fails loudly, the math fails silently.
+The game logic that guards persistent character state (level curve, exp/HP rules, party and tavern membership, cosmetic ownership and equip rules, DM-command authorization, chat HTML escaping) is covered by `overlay_controller/main_test.go`; sound commands (names, per-sound cooldowns, the folder scan) by `sounds_test.go`; and the admin page's guards (password, cross-site writes, upload checks, catalog edits, never deleting shipped art) by `admin_test.go`. Run `go test ./...` from `overlay_controller/`. The plumbing (websockets, RabbitMQ, MySQL, the overlay page itself) is deliberately untested: it fails loudly, the math fails silently.
 
 ## Notes on long-running operation
 
