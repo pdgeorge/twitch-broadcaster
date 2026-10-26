@@ -208,29 +208,41 @@
     }, 90);
   }
 
-  const ttsQueue = [];
-  let ttsPlaying = null; // { clip, audio } while a clip plays
+  // Party voices: each party member's lines play in order, but members don't
+  // wait for each other, so two people talking at once talk over each other.
+  const ttsVoices = new Map(); // speaker -> { queue: [clip], playing: { clip, audio } | null }
 
-  function playNextTTS() {
-    const next = ttsQueue.shift();
+  function queueTTS(clip) {
+    const speaker = clip.user_id || clip.name;
+    let voice = ttsVoices.get(speaker);
+    if (!voice) {
+      voice = { queue: [], playing: null };
+      ttsVoices.set(speaker, voice);
+    }
+    voice.queue.push(clip);
+    if (!voice.playing) playNextTTS(voice);
+  }
+
+  function playNextTTS(voice) {
+    const next = voice.queue.shift();
     if (!next) {
-      ttsPlaying = null;
+      voice.playing = null;
       return;
     }
     const current = { clip: next, audio: new Audio(next.url) };
-    ttsPlaying = current;
-    // Only the clip that's still current moves the queue on, so a clip cut
+    voice.playing = current;
+    // Only the clip that's still current moves its speaker on, so a clip cut
     // off by a mod, or one that errors twice over, can't skip the next one.
     let watchdog = null;
     const done = () => {
       clearTimeout(watchdog);
-      if (ttsPlaying === current) playNextTTS();
+      if (voice.playing === current) playNextTTS(voice);
     };
     current.audio.onended = done;
     current.audio.onerror = done;
     // Chromium can reject play() with an AbortError for audio that isn't in
     // the page and then play it anyway, so that isn't taken as the end. The
-    // watchdog makes sure no clip holds up the queue for good.
+    // watchdog makes sure no clip holds up its speaker for good.
     current.audio.play().catch((err) => {
       if (err.name !== 'AbortError') done();
     });
@@ -244,12 +256,12 @@
       removal.type === 'chat.clear' ||
       (removal.type === 'chat.delete' && clip.message_id === removal.message_id) ||
       (removal.type === 'chat.clear_user' && clip.user_id === removal.user_id);
-    for (let i = ttsQueue.length - 1; i >= 0; i--) {
-      if (removed(ttsQueue[i])) ttsQueue.splice(i, 1);
-    }
-    if (ttsPlaying && removed(ttsPlaying.clip)) {
-      ttsPlaying.audio.pause();
-      playNextTTS();
+    for (const voice of ttsVoices.values()) {
+      voice.queue = voice.queue.filter((clip) => !removed(clip));
+      if (voice.playing && removed(voice.playing.clip)) {
+        voice.playing.audio.pause();
+        playNextTTS(voice);
+      }
     }
   }
 
@@ -539,8 +551,7 @@
         }
 
         if (payload.type === 'tts.play') {
-          ttsQueue.push(payload);
-          if (!ttsPlaying) playNextTTS();
+          queueTTS(payload);
         }
 
         if (payload.type === 'sound.play') {
