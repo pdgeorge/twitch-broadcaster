@@ -547,3 +547,50 @@ func toStrings(v any) []string {
 	}
 	return out
 }
+
+// The guide shows the rules the code actually runs.
+func TestAdminGuide(t *testing.T) {
+	a, _ := testAdmin(t, "")
+	code, guide := call(t, a, http.MethodGet, "/admin/api/guide", nil, "")
+	if code != http.StatusOK {
+		t.Fatalf("GET guide = %d %v", code, guide)
+	}
+	if guide["party_size"] != float64(partyMaxSize) {
+		t.Errorf("party_size = %v, want %d", guide["party_size"], partyMaxSize)
+	}
+	if redeems := guide["redeems"].(map[string]any); redeems["join"] != joinPartyRewardTitle {
+		t.Errorf("join redeem = %v, want %q", redeems["join"], joinPartyRewardTitle)
+	}
+
+	levels := guide["levels"].([]any)
+	if len(levels) != guideLevels {
+		t.Fatalf("%d levels, want %d", len(levels), guideLevels)
+	}
+	per := expPerMessage(0)
+	for i, raw := range levels {
+		row := raw.(map[string]any)
+		level := i + 1
+		exp := totalExpForLevel(level)
+		if row["level"] != float64(level) || row["exp"] != float64(exp) || row["max_hp"] != float64(maxHPForLevel(level)) {
+			t.Errorf("row %v, want level %d at %d exp with %d max HP", row, level, exp, maxHPForLevel(level))
+		}
+		// Just enough of a new chatter's messages to get there.
+		messages := int64(row["messages"].(float64))
+		if messages*per < exp || (messages > 0 && (messages-1)*per >= exp) {
+			t.Errorf("level %d: %d messages of %d exp don't just reach %d", level, messages, per, exp)
+		}
+	}
+
+	// Every reward names the redeem that earns it, so the page never shows
+	// a raw counter name.
+	rewards := guide["auto_rewards"].([]any)
+	if len(rewards) != len(autoRewards) {
+		t.Fatalf("%d auto rewards, want %d", len(rewards), len(autoRewards))
+	}
+	for i, raw := range rewards {
+		reward := raw.(map[string]any)
+		if reward["cosmetic"] != autoRewards[i].Cosmetic || reward["redeem"] == "" {
+			t.Errorf("reward %v, want %s with the redeem that earns it", reward, autoRewards[i].Cosmetic)
+		}
+	}
+}

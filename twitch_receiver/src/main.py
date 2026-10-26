@@ -235,6 +235,7 @@ class TwitchEventSubClient:
             {"type": "channel.chat.message", "version": "1", "condition": chat_condition},
             {"type": "channel.chat.message_delete", "version": "1", "condition": chat_condition},
             {"type": "channel.chat.clear_user_messages", "version": "1", "condition": chat_condition},
+            {"type": "channel.chat.clear", "version": "1", "condition": chat_condition},
             {"type": "stream.online", "version": "1", "condition": broadcaster_condition},
         ]
 

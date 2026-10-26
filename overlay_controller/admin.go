@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // The /admin page manages sound commands and the cosmetic catalog from a
@@ -169,6 +170,9 @@ func (a *adminServer) route(w http.ResponseWriter, r *http.Request) (any, error)
 		return a.replaceCosmeticImage(w, r, name)
 	case "PUT slots":
 		return a.setSlots(w, r)
+
+	case "GET guide":
+		return a.guideState(), nil
 	}
 	return nil, notFound("no such endpoint: %s %s", r.Method, r.URL.Path)
 }
@@ -439,6 +443,62 @@ func (a *adminServer) setSlots(w http.ResponseWriter, r *http.Request) (any, err
 	}
 	a.redrawOverlay()
 	return a.cosmeticState(), nil
+}
+
+// guideLevels is how far the party guide's level table goes.
+const guideLevels = 10
+
+// guideState feeds the Party guide tab the rules as the code has them now,
+// so the page stays right when they're tuned.
+func (a *adminServer) guideState() any {
+	newcomer := expPerMessage(0)
+	levels := make([]map[string]any, 0, guideLevels)
+	for level := 1; level <= guideLevels; level++ {
+		exp := totalExpForLevel(level)
+		levels = append(levels, map[string]any{
+			"level":    level,
+			"exp":      exp,
+			"max_hp":   maxHPForLevel(level),
+			"messages": (exp + newcomer - 1) / newcomer, // for a new chatter to get there
+		})
+	}
+	rates := make([]map[string]int64, 0, 3)
+	for _, logins := range []int64{0, 25, 100} {
+		rates = append(rates, map[string]int64{"logins": logins, "exp": expPerMessage(logins)})
+	}
+	voiceTiers := make([]int64, 0, len(ttsVoiceTiers))
+	for _, tier := range ttsVoiceTiers {
+		if tier.minLogins > 0 {
+			voiceTiers = append(voiceTiers, tier.minLogins)
+		}
+	}
+	redeemFor := map[string]string{loginsCounter: dailyLoginRewardTitle, firstLoginsCounter: firstLoginRewardTitle}
+	rewards := make([]map[string]any, 0, len(autoRewards))
+	for _, r := range autoRewards {
+		rewards = append(rewards, map[string]any{
+			"counter":  r.Counter,
+			"redeem":   redeemFor[r.Counter],
+			"count":    r.AtLeast,
+			"cosmetic": r.Cosmetic,
+			"noun":     r.Noun,
+		})
+	}
+	return map[string]any{
+		"redeems": map[string]string{
+			"join":        joinPartyRewardTitle,
+			"daily_login": dailyLoginRewardTitle,
+			"first_login": firstLoginRewardTitle,
+		},
+		"party_size":           partyMaxSize,
+		"exp_rates":            rates,
+		"exp_cooldown_seconds": int(expCooldownDuration / time.Second),
+		"voice_tiers":          voiceTiers,
+		"revive_levels":        reviveDefaultLevels,
+		"sheet_seconds":        int(sheetDuration / time.Second),
+		"tavern_idle_minutes":  int(tavernIdleTimeout / time.Minute),
+		"levels":               levels,
+		"auto_rewards":         rewards,
+	}
 }
 
 // storeCosmeticImage saves an upload as <id>-<hash>.png. The hash gives new

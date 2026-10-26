@@ -17,8 +17,8 @@ go run ./...
 ```
 
 - The server hosts the overlay assets from `OVERLAY_STATIC_DIR` and serves them at `/`.
-- WebSocket clients connect to `/ws/overlay` and receive JSON messages for `chat.message`.
-- The admin page (`/admin`, with its JSON API under `/admin/api/`) manages sound commands and the cosmetic catalog. What it manages lives in `OVERLAY_DATA_DIR`: sounds in `sounds/` (served at `/sounds/`), uploaded cosmetic art and the live catalog in `cosmetics/` (served at `/cosmetics/`).
+- WebSocket clients connect to `/ws/overlay` and receive JSON messages: `chat.message` for each line of chat, and the rest of what the overlay draws (party, tavern, dice, sounds, TTS). `FEATURES.md` in the repo root lists them all.
+- The admin page (`/admin`, with its JSON API under `/admin/api/`) manages sound commands and the cosmetic catalog, and has a guide to the party game. What it manages lives in `OVERLAY_DATA_DIR`: sounds in `sounds/` (served at `/sounds/`), uploaded cosmetic art and the live catalog in `cosmetics/` (served at `/cosmetics/`).
 
 ## Configuration
 
@@ -59,6 +59,8 @@ WebSocket payloads use this shape:
 ```json
 {
   "type": "chat.message",
+  "message_id": "b2f6c6c8-…",
+  "user_id": "67890",
   "username": "example_user",
   "channel_id": "12345",
   "channel_login": "example_user",
@@ -73,3 +75,4 @@ WebSocket payloads use this shape:
 
 - `message_html` is pre-rendered with Twitch emotes for compatibility.
 - `fragments` and `message` allow the overlay JS to swap in BTTV/FFZ/7TV emotes client-side while reusing Twitch emote URLs.
+- `message_id` and `user_id` let the overlay take lines back off screen. When a mod deletes a message it gets `{"type": "chat.delete", "message_id": …}`, when a timeout or ban clears a chatter's messages `{"type": "chat.clear_user", "user_id": …}`, and on a `/clear` `{"type": "chat.clear"}`. `tts.play` carries the same two ids, so a party member's line still waiting to be read out is dropped too.

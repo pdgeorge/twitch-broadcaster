@@ -11,11 +11,12 @@
     <header class="topbar">
       <div>
         <h1>Overlay admin</h1>
-        <p class="subtitle">Sound commands and Dabling cosmetics. Every change is live on stream straight away.</p>
+        <p class="subtitle">Sound commands, Dabling cosmetics and a guide to the party game. Changes are live on stream straight away.</p>
       </div>
       <nav class="tabs" role="tablist" aria-label="Sections">
         <button type="button" role="tab" data-tab="sounds">Sounds</button>
         <button type="button" role="tab" data-tab="cosmetics">Cosmetics</button>
+        <button type="button" role="tab" data-tab="guide">Party guide</button>
       </nav>
     </header>
 
@@ -72,6 +73,112 @@
           <p class="hint">Hand them out in chat with <code>!give &lt;name&gt; &lt;cosmetic&gt;</code>.</p>
         </div>
         <div class="grid" data-cosmetic-grid></div>
+      </section>
+
+      <section data-panel="guide" role="tabpanel" aria-label="Party guide" hidden>
+        <div class="section-head">
+          <h2>Party guide</h2>
+          <p class="hint">A reminder of how the party game runs. The numbers come straight from the controller, so they stay right when you tune it.</p>
+        </div>
+
+        <div class="guide">
+          <div class="guide-col">
+            <article class="guide-card">
+              <h3>Channel-point rewards</h3>
+              <p>The controller goes by the reward's title, in any capitals.</p>
+              <ul>
+                <li><strong data-guide="join">…</strong> takes a seat in the party.</li>
+                <li><strong data-guide="daily_login">…</strong> adds a daily login, so more exp per message and more voices.</li>
+                <li><strong data-guide="first_login">…</strong> adds a first login. Some counts hand out cosmetics: see Automatic rewards.</li>
+              </ul>
+            </article>
+
+            <article class="guide-card">
+              <h3>Joining</h3>
+              <ul>
+                <li>There are <span data-guide="party_size">…</span> seats, and only the redeem fills them.</li>
+                <li>When the party is full or the character is dead, the bot says so in chat. Refund those redeems by hand.</li>
+                <li>Seats don't run out. A member stays until <code>!kick</code>, <code>!newparty</code>, death, or a controller restart.</li>
+                <li>Members get a card at the bottom right, and what they type is read aloud in their own TikTok voice (commands aren't). More voices unlock at <span data-guide="voice_tiers">…</span> daily logins.</li>
+              </ul>
+            </article>
+
+            <article class="guide-card">
+              <h3>Exp and levels</h3>
+              <p>Everyone who chats earns exp, not just the party: <span data-guide="exp_rates">…</span>, at most once every <span data-guide="exp_cooldown">…</span> seconds. A level-up raises max HP, refills HP and makes the Dabling bigger.</p>
+              <div class="table-wrap">
+                <table class="guide-table">
+                  <thead>
+                    <tr><th>Level</th><th>Total exp</th><th>Max HP</th><th>New chatter, flat out</th></tr>
+                  </thead>
+                  <tbody data-guide-levels></tbody>
+                </table>
+              </div>
+              <p class="hint">Flat out means a message at least every <span data-guide="exp_cooldown">…</span> seconds.</p>
+            </article>
+
+            <article class="guide-card">
+              <h3>HP, death and revival</h3>
+              <ul>
+                <li>HP only moves when you move it, with <code>!smite</code>, <code>!bless</code> or <code>!grant</code>.</li>
+                <li>At 0 HP a character dies: out of the party, off the tavern floor, and unable to rejoin.</li>
+                <li><code>!revive &lt;name&gt;</code> brings them back at full HP, <span data-guide="revive">…</span> down. Add a number to change the cost: <code>!revive &lt;name&gt; 0</code> is free.</li>
+              </ul>
+            </article>
+
+            <article class="guide-card">
+              <h3>Good to know</h3>
+              <ul>
+                <li>A controller restart, which every deploy does, empties the party. Characters are saved, so members just redeem again.</li>
+                <li>Refreshing the browser source blanks the party cards until a member chats.</li>
+                <li>Chatters leave the tavern floor after <span data-guide="tavern_idle">…</span> minutes without chatting.</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="guide-col">
+            <article class="guide-card">
+              <h3>DM commands</h3>
+              <p class="hint">For mods and you. Names are Twitch logins, with or without the @.</p>
+              <table class="guide-table commands">
+                <tbody>
+                  <tr><td><code>!grant &lt;name&gt; exp &lt;n&gt;</code></td><td>Add exp. A negative number takes it away, and levels follow.</td></tr>
+                  <tr><td><code>!grant &lt;name&gt; hp &lt;n&gt;</code></td><td>Change HP, up to max. 0 or less kills.</td></tr>
+                  <tr><td><code>!smite &lt;name&gt; &lt;n&gt;</code></td><td>Deal n damage. 0 HP kills.</td></tr>
+                  <tr><td><code>!bless &lt;name&gt; &lt;n&gt;</code></td><td>Heal n, up to max.</td></tr>
+                  <tr><td><code>!revive &lt;name&gt; [levels]</code></td><td>Bring back the dead.</td></tr>
+                  <tr><td><code>!give &lt;name&gt; &lt;n&gt;</code></td><td>Give gold. Nothing spends it yet.</td></tr>
+                  <tr><td><code>!give &lt;name&gt; &lt;cosmetic&gt;</code></td><td>Give a cosmetic, worn straight away if that slot is empty.</td></tr>
+                  <tr><td><code>!take &lt;name&gt; &lt;cosmetic&gt;</code></td><td>Take a cosmetic back.</td></tr>
+                  <tr><td><code>!kick &lt;name&gt;</code></td><td>Send a member back to the tavern and free the seat.</td></tr>
+                  <tr><td><code>!newparty</code></td><td>Empty the party.</td></tr>
+                  <tr><td><code>!sheet &lt;name&gt;</code></td><td>Level, HP, exp and gold in the billboard spot for <span data-guide="sheet">…</span> seconds.</td></tr>
+                </tbody>
+              </table>
+            </article>
+
+            <article class="guide-card">
+              <h3>Everyone's commands</h3>
+              <table class="guide-table commands">
+                <tbody>
+                  <tr><td><code>!roll</code></td><td>d20 + level for your own character, or <code>!roll &lt;name&gt;</code> for someone else's. A 20 gets fanfare and confetti, a 1 a sad trombone. Rolls change nothing: you decide what they mean.</td></tr>
+                  <tr><td><code>!wardrobe</code></td><td>What you own and what you're wearing.</td></tr>
+                  <tr><td><code>!equip &lt;cosmetic&gt;</code></td><td>Wear something you own.</td></tr>
+                  <tr><td><code>!unequip &lt;cosmetic or slot&gt;</code></td><td>Take it off.</td></tr>
+                  <tr><td><code>!sounds</code></td><td>List the sound commands.</td></tr>
+                </tbody>
+              </table>
+            </article>
+
+            <article class="guide-card">
+              <h3>Automatic rewards</h3>
+              <ul data-guide-rewards>
+                <li>…</li>
+              </ul>
+              <p class="hint">Each one lands once, and is worn straight away if that slot is empty. New ones go in <code>autoRewards</code> in <code>main.go</code>.</p>
+            </article>
+          </div>
+        </div>
       </section>
     </main>
 
