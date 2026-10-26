@@ -517,7 +517,23 @@ section > .dropzone:first-child {
   padding-right: 8px;
 }
 
-/* Shop: the stall's three boxes side by side, then the /shop page itself. */
+/* Shop: whether it's open, the stall's three boxes side by side, then the
+   /shop page itself. */
+.shop-status {
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--line-strong);
+  border-radius: var(--radius);
+}
+
+.shop-status.open {
+  color: var(--text);
+  border-left-color: var(--ok);
+}
+
 .shop-boxes {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

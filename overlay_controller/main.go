@@ -501,6 +501,29 @@ func ownsCosmetic(c *character, id string) bool {
 	return slices.ContainsFunc(c.Cosmetics, func(owned string) bool { return strings.EqualFold(owned, id) })
 }
 
+// copiesOf is how many of id c owns: shop items can be bought more than once.
+func copiesOf(c *character, id string) int {
+	n := 0
+	for _, owned := range c.Cosmetics {
+		if strings.EqualFold(owned, id) {
+			n++
+		}
+	}
+	return n
+}
+
+// addUnworn adds a catalog item to c's wardrobe without putting it on, the
+// way the shop sells them: the buyer wears it with !equip. It adds another
+// copy if c already has one, since shop items can be doubled up.
+func (cat *cosmeticCatalog) addUnworn(c *character, name string) (string, error) {
+	id, _, ok := cat.lookup(name)
+	if !ok {
+		return "", fmt.Errorf("no cosmetic called %s (have: %s)", name, strings.Join(cat.ids(), ", "))
+	}
+	c.Cosmetics = append(c.Cosmetics, id)
+	return id, nil
+}
+
 // give adds a catalog item to c's wardrobe, and wears it straight away if
 // that slot is empty so a first shirt shows up without an !equip.
 func (cat *cosmeticCatalog) give(c *character, name string) (id string, equipped bool, err error) {
@@ -571,23 +594,34 @@ func takeCosmetic(c *character, name string) (string, bool) {
 }
 
 // wardrobeSummary is the !wardrobe reply: owned items the catalog still has,
-// in the order granted, with what's being worn marked.
+// in the order granted, with how many of each when there's more than one,
+// and what's being worn marked.
 func (cat *cosmeticCatalog) wardrobeSummary(c *character) string {
-	var parts []string
-	seen := map[string]bool{}
+	var order []string
+	copies := map[string]int{}
 	for _, owned := range c.Cosmetics {
-		id, item, ok := cat.lookup(owned)
-		if !ok || seen[id] {
+		id, _, ok := cat.lookup(owned)
+		if !ok {
 			continue
 		}
-		seen[id] = true
-		if strings.EqualFold(c.Equipped[item.Slot], id) {
-			id += " (wearing)"
+		if copies[id] == 0 {
+			order = append(order, id)
 		}
-		parts = append(parts, id)
+		copies[id]++
 	}
-	if len(parts) == 0 {
+	if len(order) == 0 {
 		return "you don't own any cosmetics yet"
+	}
+	parts := make([]string, 0, len(order))
+	for _, id := range order {
+		part := id
+		if copies[id] > 1 {
+			part += fmt.Sprintf(" ×%d", copies[id])
+		}
+		if strings.EqualFold(c.Equipped[cat.Items[id].Slot], id) {
+			part += " (wearing)"
+		}
+		parts = append(parts, part)
 	}
 	return "your wardrobe: " + strings.Join(parts, ", ")
 }
@@ -1732,11 +1766,15 @@ func main() {
 	tts := newTTSManager(cfg.ttsServiceURL, hub)
 	tavern := newTavernManager(hub, cosmetics)
 	sounds := newSoundBoard(soundsDir, hub)
-	shop := newShopStore(filepath.Join(cfg.dataDir, shopFile), hub, cosmetics)
+	shop := newShopStore(filepath.Join(cfg.dataDir, shopFile), hub, cosmetics, commandPublisher)
+	if shop.isOpen() {
+		// Left open by the last run: make sure the rewards still match.
+		go shop.syncRewards(ctx)
+	}
 	go hub.run(ctx)
 	go tavern.run(ctx)
 	go func() {
-		if err := consumeChat(ctx, cfg, hub, other, store, characters, party, expCooldown, botCommands, chatLog, commandPublisher, tts, tavern, cosmetics, sounds); err != nil {
+		if err := consumeChat(ctx, cfg, hub, other, store, characters, party, expCooldown, botCommands, chatLog, commandPublisher, tts, tavern, cosmetics, sounds, shop); err != nil {
 			log.Fatalf("rabbitmq consumer stopped: %v", err)
 		}
 	}()
@@ -1803,7 +1841,7 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, chatLog *chatLogStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager, cosmetics *cosmeticCatalogStore, sounds *soundBoard) error {
+func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, chatLog *chatLogStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager, cosmetics *cosmeticCatalogStore, sounds *soundBoard, shop *shopStore) error {
 	const minBackoff = 2 * time.Second
 	const maxBackoff = 60 * time.Second
 	backoff := minBackoff
@@ -1901,7 +1939,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 					consumeLoop = false
 					break
 				}
-				handleDelivery(ctx, d, hub, other, store, characters, party, expCooldown, botCommands, chatLog, commands, tts, tavern, cosmetics, sounds)
+				handleDelivery(ctx, d, hub, other, store, characters, party, expCooldown, botCommands, chatLog, commands, tts, tavern, cosmetics, sounds, shop)
 			case <-reconnect:
 				consumeLoop = false
 			case <-ctx.Done():
@@ -1919,7 +1957,7 @@ func consumeChat(ctx context.Context, cfg config, hub *overlayHub, other *otherM
 	}
 }
 
-func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, chatLog *chatLogStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager, cosmetics *cosmeticCatalogStore, sounds *soundBoard) {
+func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, chatLog *chatLogStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager, cosmetics *cosmeticCatalogStore, sounds *soundBoard, shop *shopStore) {
 	defer d.Ack(false)
 
 	var payload eventPayload
@@ -1936,7 +1974,7 @@ func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other
 	switch eventType {
 	case "channel.chat.message":
 		handleChatLogEvent(ctx, eventType, payload.Event, chatLog)
-		handleChatEvent(ctx, payload.Event, hub, other, characters, party, expCooldown, botCommands, commands, tts, tavern, cosmetics, sounds)
+		handleChatEvent(ctx, payload.Event, hub, other, characters, party, expCooldown, botCommands, commands, tts, tavern, cosmetics, sounds, shop)
 	case "channel.chat.message_delete", "channel.chat.clear_user_messages":
 		handleChatLogEvent(ctx, eventType, payload.Event, chatLog)
 		removeChat(eventType, payload.Event, hub, tts)
@@ -1945,7 +1983,7 @@ func handleDelivery(ctx context.Context, d amqp.Delivery, hub *overlayHub, other
 		// those rows unflagged: it doesn't single out anyone's messages.
 		removeChat(eventType, payload.Event, hub, tts)
 	case "channel.channel_points_custom_reward_redemption.add":
-		handleRedeemEvent(ctx, payload.Event, other, store, characters, party, commands, tavern, cosmetics)
+		handleRedeemEvent(ctx, payload.Event, other, store, characters, party, commands, tavern, cosmetics, shop)
 	default:
 		return
 	}
@@ -2095,7 +2133,7 @@ func normalizeMarkdownInput(input string) string {
 	return normalized
 }
 
-func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub, other *otherManager, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager, cosmetics *cosmeticCatalogStore, sounds *soundBoard) {
+func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub, other *otherManager, characters *characterStore, party *partyManager, expCooldown *expCooldownTracker, botCommands *botCommandStore, commands *commandPublisher, tts *ttsManager, tavern *tavernManager, cosmetics *cosmeticCatalogStore, sounds *soundBoard, shop *shopStore) {
 	if event == nil {
 		return
 	}
@@ -2117,6 +2155,10 @@ func handleChatEvent(ctx context.Context, event map[string]any, hub *overlayHub,
 
 	if lower == "!sounds" {
 		handleSoundsCommand(ctx, event, sounds, commands)
+	}
+
+	if lower == "!openshop" || lower == "!closeshop" {
+		handleShopCommand(ctx, event, lower, shop, commands)
 	}
 
 	if isAuthorizedForOther(event) {
@@ -2747,7 +2789,7 @@ func handlePossessionRedeem(ctx context.Context, event map[string]any, character
 	}
 }
 
-func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, commands *commandPublisher, tavern *tavernManager, cosmetics *cosmeticCatalogStore) {
+func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherManager, store *loginStore, characters *characterStore, party *partyManager, commands *commandPublisher, tavern *tavernManager, cosmetics *cosmeticCatalogStore, shop *shopStore) {
 	if event == nil {
 		return
 	}
@@ -2757,6 +2799,8 @@ func handleRedeemEvent(ctx context.Context, event map[string]any, other *otherMa
 	rewarder := &autoRewarder{characters: characters, party: party, tavern: tavern, cosmetics: cosmetics}
 
 	switch {
+	case shopRewardBox(title) > 0:
+		handleShopRedeem(ctx, event, shopRewardBox(title), shop, characters, party, commands)
 	case strings.EqualFold(title, "announcement"):
 		userInput := firstString(event["user_input"], "")
 		other.startAnnouncement(markdownToHTML(normalizeMarkdownInput(userInput)), 5*time.Minute)

@@ -19,8 +19,11 @@ LOGGER = logging.getLogger("twitch_receiver")
 
 TWITCH_EVENTSUB_WS = "wss://eventsub.wss.twitch.tv/ws"
 TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
-TWITCH_EVENTSUB_URL = "https://api.twitch.tv/helix/eventsub/subscriptions"
-TWITCH_CHAT_MESSAGES_URL = "https://api.twitch.tv/helix/chat/messages"
+TWITCH_API = "https://api.twitch.tv/helix"
+TWITCH_EVENTSUB_URL = f"{TWITCH_API}/eventsub/subscriptions"
+TWITCH_CHAT_MESSAGES_URL = f"{TWITCH_API}/chat/messages"
+TWITCH_REWARDS_URL = f"{TWITCH_API}/channel_points/custom_rewards"
+TWITCH_REDEMPTIONS_URL = f"{TWITCH_API}/channel_points/custom_rewards/redemptions"
 
 # A socket must stay up this long before its drop counts as a fresh failure
 STABLE_CONNECTION_SECONDS = 60
@@ -162,12 +165,39 @@ class RabbitCommandConsumer:
         await self.queue.consume(handler)
 
 
+def reward_field(reward: Dict[str, Any], key: str) -> Any:
+    """A field of a reward as Helix's GET returns it. The per-user-per-stream
+    limit is set with two flat fields but comes back nested in one setting."""
+    limit = reward.get("max_per_user_per_stream_setting") or {}
+    if key == "is_max_per_user_per_stream_enabled":
+        return limit.get("is_enabled")
+    if key == "max_per_user_per_stream":
+        return limit.get("max_per_user_per_stream")
+    return reward.get(key)
+
+
+def reward_error(action: str, status: int, detail: str) -> str:
+    """What went wrong managing a channel-point reward, with the usual fix."""
+    hint = ""
+    if status == 401:
+        hint = " The token needs the channel:manage:redemptions scope: make a new one with tools/auth_code_server.py --all-scopes."
+    elif status == 403:
+        hint = " Twitch only lets the app that made a reward change it, and the token needs channel:manage:redemptions."
+    elif "DUPLICATE" in detail:
+        hint = " A reward with that title already exists but wasn't made by this bot: delete or rename it in the Twitch dashboard."
+    return f"Couldn't {action}: status {status}: {detail}.{hint}"
+
+
 class TwitchEventSubClient:
     def __init__(self, tokens: TokenManager, channel_id: str, publisher: RabbitPublisher):
         self.tokens = tokens
         self.channel_id = channel_id
         self.publisher = publisher
         self.session: aiohttp.ClientSession | None = None
+        # Commands are handled concurrently, so reward syncs take turns, and a
+        # sync older than one already applied is dropped.
+        self.rewards_lock = asyncio.Lock()
+        self.rewards_seq = 0
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if not self.session:
@@ -276,6 +306,73 @@ class TwitchEventSubClient:
             if resp.status >= 300:
                 detail = await resp.text()
                 raise RuntimeError(f"Chat send failed: status {resp.status}: {detail}")
+
+    async def sync_rewards(self, rewards: List[Dict[str, Any]], seq: int = 0) -> None:
+        """Make the bot's own channel-point rewards match rewards, a list of
+        {title, cost, prompt, enabled, background_color, max_per_user_per_stream}:
+        Dabi's shop sends one
+        whenever it opens, closes or is restocked. Twitch only lets the app that
+        made a reward change it or refund it, which is why the bot makes them.
+        One that's missing is created only if it should be on."""
+        async with self.rewards_lock:
+            if seq and seq <= self.rewards_seq:
+                LOGGER.info("Skipping a stale reward sync")
+                return
+            session = await self._ensure_session()
+            headers = await self._auth_headers()
+            params = {"broadcaster_id": self.channel_id, "only_manageable_rewards": "true"}
+            async with session.get(TWITCH_REWARDS_URL, headers=headers, params=params) as resp:
+                if resp.status >= 300:
+                    raise RuntimeError(reward_error("list the bot's rewards", resp.status, await resp.text()))
+                existing = {r["title"].lower(): r for r in (await resp.json()).get("data", [])}
+
+            problems = []
+            for spec in rewards:
+                title = str(spec["title"])
+                want = {
+                    "title": title,
+                    "cost": int(spec["cost"]),
+                    "prompt": str(spec.get("prompt", "")),
+                    "is_enabled": bool(spec.get("enabled")),
+                }
+                if spec.get("background_color"):
+                    want["background_color"] = str(spec["background_color"])
+                if spec.get("max_per_user_per_stream"):
+                    want["is_max_per_user_per_stream_enabled"] = True
+                    want["max_per_user_per_stream"] = int(spec["max_per_user_per_stream"])
+                current = existing.get(title.lower())
+                if current:
+                    if all(reward_field(current, key) == value for key, value in want.items()):
+                        continue
+                    request = session.patch(TWITCH_REWARDS_URL, headers=headers, params={"broadcaster_id": self.channel_id, "id": current["id"]}, json=want)
+                    action = f"update the {title} reward"
+                elif want["is_enabled"]:
+                    want["should_redemptions_skip_request_queue"] = False  # left in the queue, so they can be refunded
+                    request = session.post(TWITCH_REWARDS_URL, headers=headers, params={"broadcaster_id": self.channel_id}, json=want)
+                    action = f"create the {title} reward"
+                else:
+                    continue
+                async with request as resp:
+                    if resp.status >= 300:
+                        problems.append(reward_error(action, resp.status, await resp.text()))
+                        continue
+                LOGGER.info("Reward %s: %s, cost=%s, enabled=%s", "updated" if current else "created", title, want["cost"], want["is_enabled"])
+            if seq:
+                self.rewards_seq = seq
+            if problems:
+                raise RuntimeError(" ".join(problems))
+
+    async def set_redemption_status(self, reward_id: str, redemption_id: str, status: str) -> None:
+        """Mark a redemption of one of the bot's rewards FULFILLED, or CANCELED,
+        which gives the viewer their points back."""
+        if status not in ("FULFILLED", "CANCELED"):
+            raise RuntimeError(f"Unknown redemption status {status!r}")
+        session = await self._ensure_session()
+        headers = await self._auth_headers()
+        params = {"broadcaster_id": self.channel_id, "reward_id": reward_id, "id": redemption_id}
+        async with session.patch(TWITCH_REDEMPTIONS_URL, headers=headers, params=params, json={"status": status}) as resp:
+            if resp.status >= 300:
+                raise RuntimeError(reward_error(f"mark a redemption {status}", resp.status, await resp.text()))
 
     async def _handle_notification(self, message: Dict[str, Any]) -> None:
         payload = message.get("payload", {})
@@ -423,13 +520,27 @@ def main() -> None:
                         if not channel or not chat_message:
                             LOGGER.warning("send_chat missing channel_id or message")
                             return
-                        try:
-                            await client.send_chat(str(chat_message), str(channel))
-                            LOGGER.info("Command completed: %s", event_type)
-                        except Exception as exc:
-                            LOGGER.error("Command failed: %s: %s", event_type, exc)
+                        run = client.send_chat(str(chat_message), str(channel))
+                    elif event_type == "channel.command.sync_rewards":
+                        rewards = payload.get("rewards")
+                        if not isinstance(rewards, list):
+                            LOGGER.warning("sync_rewards missing rewards")
+                            return
+                        run = client.sync_rewards(rewards, int(payload.get("seq") or 0))
+                    elif event_type == "channel.command.redemption_status":
+                        reward_id, redemption_id, status = payload.get("reward_id"), payload.get("redemption_id"), payload.get("status")
+                        if not reward_id or not redemption_id or not status:
+                            LOGGER.warning("redemption_status missing reward_id, redemption_id or status")
+                            return
+                        run = client.set_redemption_status(str(reward_id), str(redemption_id), str(status))
                     else:
                         LOGGER.warning("Unknown command type: %s", event_type)
+                        return
+                    try:
+                        await run
+                        LOGGER.info("Command completed: %s", event_type)
+                    except Exception as exc:
+                        LOGGER.error("Command failed: %s: %s", event_type, exc)
 
             await command_consumer.consume(handle_command_message)
             await client.listen()

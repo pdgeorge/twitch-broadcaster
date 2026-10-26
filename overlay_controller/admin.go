@@ -314,7 +314,7 @@ func (a *adminServer) setShop(w http.ResponseWriter, r *http.Request) (any, erro
 	if err := readJSON(w, r, &req); err != nil {
 		return nil, err
 	}
-	if err := a.shop.set(req.Boxes); err != nil {
+	if err := a.shop.set(r.Context(), req.Boxes); err != nil {
 		return nil, err
 	}
 	return a.shop.adminState(), nil

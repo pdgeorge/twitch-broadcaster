@@ -652,6 +652,7 @@
 
   const shopBoxes = document.querySelector('[data-shop-boxes]');
   const shopDefault = document.querySelector('[data-shop-default]');
+  const shopStatus = document.querySelector('[data-shop-status]');
   const MAX_PRICE = 1000000;
   let shop = null; // what the server last confirmed
 
@@ -662,6 +663,10 @@
   function renderShop(state) {
     shop = state;
     shopDefault.textContent = state.default_price;
+    shopStatus.classList.toggle('open', state.open);
+    shopStatus.textContent = state.open
+      ? `The shop is open: chat buys with the "Buy item" rewards, one per box with something in it, up to ${state.max_per_stream} of each per chatter per stream. !closeshop in chat closes it.`
+      : 'The shop is closed. !openshop in chat (from you) opens it and switches on a "Buy item" reward for each box with something in it.';
     shopBoxes.replaceChildren(...state.boxes.map(shopBoxCard));
   }
 

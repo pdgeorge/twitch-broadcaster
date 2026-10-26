@@ -42,7 +42,8 @@ The white text box in the middle of the tavern floor. It's invisible when empty,
 A market stall where chatters buy cosmetics with channel points. It isn't on stream yet: it opens with Dabi.
 
 - **Built**: `/shop` (`http://dabi:8080/shop/`), the 1920×1080 browser source for the Dabi-Shop scene. It draws the stall with a Dabling in each of its three boxes, wearing what that box sells, and the prices, and redraws on `shop.update`. The Shop tab on `/admin` sets what's in each box and its price, 300 channel points to start. The stall art is a Blender render made by `tools/shop_stall.py`.
-- **Still to come**: "buy item 1/2/3" rewards, on only while the shop is open, putting what's bought in the buyer's wardrobe, unworn. `!openshop` / `!closeshop` switching to the Dabi-Shop scene and its music. Dabi thanking buyers, with a switch to turn that off.
+- **Buying, built**: `!openshop` / `!closeshop` (the broadcaster only) open and close it and tell chat. While it's open, chat buys with the "Buy item 1/2/3" rewards, which the bot makes itself and switches on only for boxes with something in them. A purchase goes into the buyer's wardrobe, unworn. Doubles are fine (`!wardrobe` shows `shirtA ×2`), and each reward allows a chatter 3 a stream. The points go back if the box is empty, the shop is closed or the price just changed. Needs the `channel:manage:redemptions` scope on the Twitch token.
+- **Still to come**: `!openshop` / `!closeshop` also switching to the Dabi-Shop scene and its music. Dabi thanking buyers, with a switch to turn that off.
 
 ## Next door: Dabi
 

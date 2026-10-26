@@ -618,7 +618,9 @@ func TestWardrobeSummary(t *testing.T) {
 	}
 	c.Cosmetics = []string{"shirtA", "retiredShirt", "shirtB", "shirta"}
 	c.Equipped = map[string]string{"torso": "shirtB"}
-	if got, want := cat.wardrobeSummary(c), "your wardrobe: shirtA, shirtB (wearing)"; got != want {
+	// Two copies of shirtA (shop items can be doubled up), counted whatever
+	// their case; the retired one is skipped.
+	if got, want := cat.wardrobeSummary(c), "your wardrobe: shirtA ×2, shirtB (wearing)"; got != want {
 		t.Errorf("wardrobe = %q, want %q", got, want)
 	}
 }

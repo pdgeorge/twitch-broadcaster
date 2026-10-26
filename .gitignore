@@ -11,6 +11,9 @@ venv
 *.mp3
 *.wav
 test*
+# ...but not the receiver's tests
+!twitch_receiver/tests/
+!twitch_receiver/tests/*.py
 *.kra
 *.png
 !resources/*.png
