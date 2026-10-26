@@ -30,6 +30,8 @@ go run ./...
 - `OVERLAY_STATIC_DIR` (default `./overlay`)
 - `OVERLAY_DATA_DIR` (default `./data`; `/data` in Docker): where sounds, uploaded cosmetic art, the live cosmetic catalog and the shop's stock are kept
 - `ADMIN_PASSWORD` (optional): when set, `/admin` asks for it via basic auth (any username)
+- `DECK_URL` (Docker default `http://pd-streamdeck:8095`) and `DECK_TOKEN`: pd-streamdeck, which `!openshop` / `!closeshop` use to switch the OBS scene and the music. With no `DECK_URL`, the shop leaves OBS alone.
+- `SHOP_SCENE` (default `Dabi-Shop`) and `SHOP_MOOD` (default `shop`): the OBS scene and pd-streamdeck music mood the shop switches to
 - `LOGIN_DB_PATH` (default `/data/login_counts.db`)
 - `TOKEN_CACHE_PATH` (default `/data/tokens.json`)
 - `CLIENT_ID` (your Twitch application client ID)

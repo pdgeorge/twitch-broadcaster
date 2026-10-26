@@ -44,6 +44,10 @@ type config struct {
 	mysqlDSN        string
 	ttsServiceURL   string
 	adminPassword   string
+	deckURL         string // pd-streamdeck, which switches OBS scenes and music for the shop
+	deckToken       string
+	shopScene       string
+	shopMood        string
 }
 
 type chatFragment struct {
@@ -1767,6 +1771,14 @@ func main() {
 	tavern := newTavernManager(hub, cosmetics)
 	sounds := newSoundBoard(soundsDir, hub)
 	shop := newShopStore(filepath.Join(cfg.dataDir, shopFile), hub, cosmetics, commandPublisher)
+	var deck *deckClient
+	if cfg.deckURL == "" {
+		log.Print("shop: DECK_URL isn't set, so !openshop won't switch the OBS scene or the music")
+	} else {
+		deck = newDeckClient(cfg.deckURL, cfg.deckToken)
+	}
+	shop.stage = newShopStage(deck, shop, cfg.shopScene, cfg.shopMood)
+	go shop.stage.run(ctx)
 	if shop.isOpen() {
 		// Left open by the last run: make sure the rewards still match.
 		go shop.syncRewards(ctx)
@@ -1831,6 +1843,10 @@ func loadConfig() config {
 		mysqlDSN:        env("MYSQL_DSN", "echoes:echoespw@tcp(mysql:3306)/echoes?parseTime=true"),
 		ttsServiceURL:   env("TTS_SERVICE_URL", "http://tts_service:8081"),
 		adminPassword:   os.Getenv("ADMIN_PASSWORD"),
+		deckURL:         os.Getenv("DECK_URL"),
+		deckToken:       os.Getenv("DECK_TOKEN"),
+		shopScene:       env("SHOP_SCENE", defaultShopScene),
+		shopMood:        env("SHOP_MOOD", defaultShopMood),
 	}
 }
 

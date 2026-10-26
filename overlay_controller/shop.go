@@ -60,8 +60,9 @@ const shopClosedRefund = "How on earth did you manage to redeem while the shop w
 // shop comes back at the price it had.
 type shopStock struct {
 	Open   bool           `json:"open"`
-	Boxes  []string       `json:"boxes"`  // cosmetic ids, one per box; "" leaves it empty
-	Prices map[string]int `json:"prices"` // by id; an item without one costs defaultShopPrice
+	Boxes  []string       `json:"boxes"`            // cosmetic ids, one per box; "" leaves it empty
+	Prices map[string]int `json:"prices"`           // by id; an item without one costs defaultShopPrice
+	Before *shopBefore    `json:"before,omitempty"` // the scene and music the open shop replaced
 }
 
 // shopBox is one box as the pages draw it. Item is "" for an empty box.
@@ -82,6 +83,7 @@ type shopStore struct {
 	hub       *overlayHub
 	cosmetics *cosmeticCatalogStore
 	commands  commandSender // nil leaves the rewards alone
+	stage     *shopStage    // nil leaves OBS and the music alone
 
 	mu    sync.Mutex
 	stock shopStock
@@ -204,7 +206,7 @@ func (s *shopStore) set(ctx context.Context, boxes []shopBox) error {
 	}
 
 	s.mu.Lock()
-	next.Open = s.stock.Open
+	next.Open, next.Before = s.stock.Open, s.stock.Before
 	for id, price := range s.stock.Prices {
 		if _, set := next.Prices[id]; !set {
 			next.Prices[id] = price
@@ -235,6 +237,30 @@ func (s *shopStore) setOpen(ctx context.Context, open bool) error {
 	}
 	s.syncRewards(ctx)
 	return nil
+}
+
+// setBefore remembers what the shop replaced in OBS, for !closeshop to put back.
+func (s *shopStore) setBefore(before *shopBefore) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := s.stock
+	next.Before = before
+	return s.saveLocked(next)
+}
+
+// takeBefore hands back what the shop replaced in OBS, and forgets it.
+func (s *shopStore) takeBefore() *shopBefore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	before := s.stock.Before
+	if before != nil {
+		next := s.stock
+		next.Before = nil
+		if err := s.saveLocked(next); err != nil {
+			log.Printf("shop: failed to save: %v", err)
+		}
+	}
+	return before
 }
 
 // rewardSpecs is how the rewards should be, one per box.
@@ -340,6 +366,7 @@ func handleShopCommand(ctx context.Context, event map[string]any, lower string, 
 		return
 	}
 	log.Printf("shop: open=%v", open)
+	shop.stage.queue(open)
 	message := "Dabi's shop is closed. Thanks for shopping!"
 	if open {
 		message = shop.openMessage()
