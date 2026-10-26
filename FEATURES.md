@@ -52,7 +52,7 @@ For rebuilding the overlay: what's on screen, where it sits on the 1920×1080 ca
 | Party cards (`#party-cards`) | bottom right, above the floor (right 20, bottom 172), growing leftward | `party.update` |
 | Billboard (`#other-box`) | middle of the floor (left 727, top 918, 1160×148) | `other.update` |
 | Dice (`#roll-box`) | centred, about a third of the way down | `roll.result` |
-| Party voices | audio only, one clip at a time, dropped if a mod removes the message | `tts.play` |
+| Party voices | audio only. Party members talk over each other, but each one's own lines play in turn. Dropped if a mod removes the message | `tts.play` |
 | Sound commands | audio only, played straight away, can overlap | `sound.play` |
 
 The controller also sends `tavern.possess`, `tavern.return` and `tavern.death` when someone joins the party, leaves it or dies, but nothing draws them yet.
