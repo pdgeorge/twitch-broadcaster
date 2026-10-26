@@ -11,7 +11,7 @@ A one-page summary of what this stack does on stream, what the overlay is made o
 - **Login redeems**: "daily login bonus" and "first login bonus" each keep a count per chatter, and the bot replies with the new total. A chatter's first "first login bonus" also gives them the `bronze_first` shirt, the only automatic reward so far.
 - **Custom text commands**: mods add one with `#a !discord <reply>` and remove it with `#d !discord`. Anyone who types exactly `!discord` gets the reply.
 - **Chat log**: every message is saved to MySQL (`chat_log`) permanently. Messages a mod deletes, or that a timeout or ban clears, are marked deleted but kept. This is the groundwork for Chat on Trial in `PLANS.md`.
-- **`/admin`**: `http://dabi:8080/admin`, with Sounds, Cosmetics and Party guide tabs.
+- **`/admin`**: `http://dabi:8080/admin`, with Sounds, Cosmetics, Shop and Party guide tabs.
 
 ## The party game
 
@@ -36,6 +36,13 @@ The white text box in the middle of the tavern floor. It's invisible when empty,
 - `!other <text>` (mods) sets its text. Markdown works.
 - An "announcement" redeem, if one is added back, shows the viewer's text for 5 minutes. `!fire` ends it early and puts the `!other` text back.
 - `!sheet` (above) also draws here.
+
+## Dabi's shop (from 1 December)
+
+A market stall where chatters buy cosmetics with channel points. It isn't on stream yet: it opens with Dabi.
+
+- **Built**: `/shop` (`http://dabi:8080/shop/`), the 1920×1080 browser source for the Dabi-Shop scene. It draws the stall with a Dabling in each of its three boxes, wearing what that box sells, and the prices, and redraws on `shop.update`. The Shop tab on `/admin` sets what's in each box and its price, 300 channel points to start. The stall art is a Blender render made by `tools/shop_stall.py`.
+- **Still to come**: "buy item 1/2/3" rewards, on only while the shop is open, putting what's bought in the buyer's wardrobe, unworn. `!openshop` / `!closeshop` switching to the Dabi-Shop scene and its music. Dabi thanking buyers, with a switch to turn that off.
 
 ## Next door: Dabi
 

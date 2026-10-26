@@ -18,7 +18,8 @@ go run ./...
 
 - The server hosts the overlay assets from `OVERLAY_STATIC_DIR` and serves them at `/`.
 - WebSocket clients connect to `/ws/overlay` and receive JSON messages: `chat.message` for each line of chat, and the rest of what the overlay draws (party, tavern, dice, sounds, TTS). `FEATURES.md` in the repo root lists them all.
-- The admin page (`/admin`, with its JSON API under `/admin/api/`) manages sound commands and the cosmetic catalog, and has a guide to the party game. What it manages lives in `OVERLAY_DATA_DIR`: sounds in `sounds/` (served at `/sounds/`), uploaded cosmetic art and the live catalog in `cosmetics/` (served at `/cosmetics/`).
+- The admin page (`/admin`, with its JSON API under `/admin/api/`) manages sound commands, the cosmetic catalog and what Dabi's shop sells, and has a guide to the party game. What it manages lives in `OVERLAY_DATA_DIR`: sounds in `sounds/` (served at `/sounds/`), uploaded cosmetic art and the live catalog in `cosmetics/` (served at `/cosmetics/`), and the shop's stock in `shop.json`.
+- Dabi's shop is a separate page at `/shop/`. It loads the stock from `/shop/stock` and redraws on `shop.update` over the same websocket.
 
 ## Configuration
 
@@ -27,7 +28,7 @@ go run ./...
 - `OVERLAY_QUEUE` (default `overlay_chat`)
 - `OVERLAY_HTTP_PORT` (default `8080`)
 - `OVERLAY_STATIC_DIR` (default `./overlay`)
-- `OVERLAY_DATA_DIR` (default `./data`; `/data` in Docker): where sounds, uploaded cosmetic art and the live cosmetic catalog are kept
+- `OVERLAY_DATA_DIR` (default `./data`; `/data` in Docker): where sounds, uploaded cosmetic art, the live cosmetic catalog and the shop's stock are kept
 - `ADMIN_PASSWORD` (optional): when set, `/admin` asks for it via basic auth (any username)
 - `LOGIN_DB_PATH` (default `/data/login_counts.db`)
 - `TOKEN_CACHE_PATH` (default `/data/tokens.json`)

@@ -37,7 +37,7 @@ RABBITMQ_EXCHANGE=twitch_events
    - `twitch_broadcaster` is a RabbitMQ broker with the management UI exposed on port `15672`.
    - `twitch-receiver` connects to Twitch EventSub over WebSockets, subscribes to all channel events for `CHANNEL_ID`, and publishes them to the `twitch_events` exchange in RabbitMQ.
    - A named Docker volume (`tokens`) is mounted at `/data` inside `twitch-receiver` so refreshed tokens persist across restarts.
-   - `overlay_controller` consumes chat messages from RabbitMQ, serves the overlay assets from `overlay/`, and exposes a WebSocket endpoint at `/ws/overlay` for the overlay page. It also serves the admin page at `/admin` and keeps what that manages (sounds, cosmetic art, the live cosmetic catalog) in `./data`, mounted at `/data`.
+   - `overlay_controller` consumes chat messages from RabbitMQ, serves the overlay assets from `overlay/`, and exposes a WebSocket endpoint at `/ws/overlay` for the overlay page. It also serves the admin page at `/admin` and Dabi's shop at `/shop`, and keeps what `/admin` manages (sounds, cosmetic art, the live cosmetic catalog, the shop's stock) in `./data`, mounted at `/data`.
 
 2. (Optional) Tail the receiver logs:
    ```
@@ -107,10 +107,11 @@ Any chatter can type `!<name>` to play a sound through the overlay: `!buhee` pla
 
 ### Admin page (`/admin`)
 
-`http://dabi:8080/admin` manages sounds and cosmetics from a browser. Every change is live on stream straight away, with no restart.
+`http://dabi:8080/admin` manages sounds, cosmetics and Dabi's shop from a browser. Every change is live on stream straight away, with no restart.
 
 - **Sounds**: drop in audio files (each becomes `!<file name>`), set cooldown and volume (saved as you leave the field), rename, swap in a better version of the file, play it on stream to check its level, delete.
 - **Cosmetics**: drop in PNGs (each becomes a cosmetic named after its file; pick its slot), replace an item's art (everyone who owns it sees the new version), move it to another slot, delete it, and add, reorder or remove slots. Uploads are checked: a PNG, the same 500×600 shape as `Dabling.png`, with a transparent background.
+- **Shop**: what each of the three boxes on Dabi's stall sells and its price in channel points, with a live preview of `/shop`. See "Dabi's shop" below.
 - **Party guide**: a reminder of how the party game runs: the channel-point rewards, joining, exp and a level table, death and revival, and every command. Its numbers come from the controller, so it stays right when you tune them.
 
 Everything it manages lives in `data/` on the Pi (`/data` in the container), not in the git checkout, so `git pull` never trips over it. Back up `data/` along with the MySQL volume. There's no login by default since it's meant for the LAN/Tailscale; set `ADMIN_PASSWORD` in `.env` and the browser asks for it (any username).
@@ -128,9 +129,18 @@ Add and edit cosmetics on the admin page. The live catalog is `data/cosmetics/co
 
 **Automatic rewards.** Some items are handed out on their own when a chatter's counter reaches a milestone. Redeeming “first login bonus” for the first time grants `bronze_first` (a bronze shirt with a “1” medallion, drawn by `python3 tools/gen_bronze_first.py`), and the bot announces “@name you have received the bronze_first shirt!”. As with `!give`, the item is put on only if that slot is empty. Each reward lands once: an owned item is never re-granted. To add another, draw the item, add it to the starter catalog (`overlay/assets/cosmetics/cosmetics.json`, which reaches the live one on the Pi by itself), and add a line to `autoRewards` in `overlay_controller/main.go` naming the counter (`logins` or `first_logins`), the count it unlocks at, the item, and what the announcement calls it. A test checks that every reward's item is in the shipped catalog.
 
+### Dabi's shop (`/shop`)
+
+Dabi's market stall, where chatters buy cosmetics with channel points. It goes live with Dabi on 1 December. Built so far: the stall and what it sells. Still to come: the "buy item 1/2/3" channel-point rewards (on only while the shop is open), `!openshop` / `!closeshop` switching OBS to the Dabi-Shop scene with its music, and Dabi thanking buyers.
+
+- `http://dabi:8080/shop/` is the browser source for the Dabi-Shop scene, at 1920×1080. It draws the stall with a base (untinted) Dabling in each box wearing that box's item, so chat can see how it looks on, and the price on the tag under it. It redraws as soon as the stock changes. Dabi sits on the stool, added on top of it in OBS.
+- The Shop tab on `/admin` picks what each box sells, or leaves it empty, and sets prices. A new item costs 300 channel points (what Twitch gives for a follow), and an item keeps its price when it leaves the shop and comes back. One item can't be in two boxes, and deleting a cosmetic empties its box.
+- The stock lives in `data/shop.json`. `/shop` loads it from `GET /shop/stock` and gets changes as `shop.update` on `/ws/overlay`.
+- The stall art (`overlay/shop/stall.png`) is built in Blender by `tools/shop_stall.py`, the same way Dabi is built in vtuber-george: every piece comes from code, so changing a number and running it again gives a new render. Run `blender -b --factory-startup --python tools/shop_stall.py -- overlay/shop` from the repo root (Blender 5.2). It also writes `overlay/shop/layout.json`, where each box's backing, each price tag and the stool's seat landed in the render, which is how `/shop` lines the items and prices up with the art. Add `--transparent` after the folder for the stall alone, without the sky and grass.
+
 ## Tests
 
-The game logic that guards persistent character state (level curve, exp/HP rules, party and tavern membership, cosmetic ownership and equip rules, DM-command authorization, chat HTML escaping, moderation taking messages off the chat and party TTS) is covered by `overlay_controller/main_test.go`; sound commands (names, per-sound cooldowns, the folder scan) by `sounds_test.go`; and the admin page's guards (password, cross-site writes, upload checks, catalog edits, never deleting shipped art) and the party guide's numbers by `admin_test.go`. Run `go test ./...` from `overlay_controller/`. The plumbing (websockets, RabbitMQ, MySQL, the overlay page itself) is deliberately untested: it fails loudly, the math fails silently.
+The game logic that guards persistent character state (level curve, exp/HP rules, party and tavern membership, cosmetic ownership and equip rules, DM-command authorization, chat HTML escaping, moderation taking messages off the chat and party TTS) is covered by `overlay_controller/main_test.go`; sound commands (names, per-sound cooldowns, the folder scan) by `sounds_test.go`; the shop's stock (restocking, prices, what it refuses, surviving a restart) by `shop_test.go`; and the admin page's guards (password, cross-site writes, upload checks, catalog edits, never deleting shipped art) and the party guide's numbers by `admin_test.go`. Run `go test ./...` from `overlay_controller/`. The plumbing (websockets, RabbitMQ, MySQL, the overlay page itself) is deliberately untested: it fails loudly, the math fails silently.
 
 ## Notes on long-running operation
 

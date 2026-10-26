@@ -11,11 +11,12 @@
     <header class="topbar">
       <div>
         <h1>Overlay admin</h1>
-        <p class="subtitle">Sound commands, Dabling cosmetics and a guide to the party game. Changes are live on stream straight away.</p>
+        <p class="subtitle">Sound commands, Dabling cosmetics, Dabi's shop and a guide to the party game. Changes are live on stream straight away.</p>
       </div>
       <nav class="tabs" role="tablist" aria-label="Sections">
         <button type="button" role="tab" data-tab="sounds">Sounds</button>
         <button type="button" role="tab" data-tab="cosmetics">Cosmetics</button>
+        <button type="button" role="tab" data-tab="shop">Shop</button>
         <button type="button" role="tab" data-tab="guide">Party guide</button>
       </nav>
     </header>
@@ -73,6 +74,22 @@
           <p class="hint">Hand them out in chat with <code>!give &lt;name&gt; &lt;cosmetic&gt;</code>.</p>
         </div>
         <div class="grid" data-cosmetic-grid></div>
+      </section>
+
+      <section data-panel="shop" role="tabpanel" aria-label="Shop" hidden>
+        <div class="section-head">
+          <h2>Dabi's shop</h2>
+          <p class="hint">What the three boxes on Dabi's stall sell, and what each item costs in channel points. Changes show on <a href="/shop/" target="_blank" rel="noopener">/shop</a> straight away. A new item starts at <span data-shop-default>300</span>, and an item keeps its price when it leaves the shop and comes back.</p>
+        </div>
+        <div class="shop-boxes" data-shop-boxes></div>
+
+        <div class="section-head">
+          <h2>Preview</h2>
+          <p class="hint">The /shop page, the browser source for the Dabi-Shop scene (1920×1080). Dabi sits on the stool, in OBS, on top of it.</p>
+        </div>
+        <div class="shop-preview">
+          <iframe src="/shop/" title="The /shop page" loading="lazy"></iframe>
+        </div>
       </section>
 
       <section data-panel="guide" role="tabpanel" aria-label="Party guide" hidden>

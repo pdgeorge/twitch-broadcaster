@@ -1732,6 +1732,7 @@ func main() {
 	tts := newTTSManager(cfg.ttsServiceURL, hub)
 	tavern := newTavernManager(hub, cosmetics)
 	sounds := newSoundBoard(soundsDir, hub)
+	shop := newShopStore(filepath.Join(cfg.dataDir, shopFile), hub, cosmetics)
 	go hub.run(ctx)
 	go tavern.run(ctx)
 	go func() {
@@ -1752,10 +1753,12 @@ func main() {
 		botCommands:  botCommands,
 		party:        party,
 		tavern:       tavern,
+		shop:         shop,
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws/overlay", hub.handleWS)
+	mux.HandleFunc("/shop/stock", shop.serveStock)
 	mux.HandleFunc("/tts/", tts.serveClip)
 	mux.Handle("/admin/", admin)
 	mux.Handle("/sounds/", http.StripPrefix("/sounds/", serveMedia(soundsDir, soundExts...)))

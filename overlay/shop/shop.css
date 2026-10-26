@@ -1,0 +1,44 @@
+/* /shop: Dabi's stall, the browser source for the Dabi-Shop scene. It's laid
+   out at OBS's 1920x1080 and scaled down to fit anything smaller, like the
+   preview on /admin's Shop tab. */
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+
+.stage {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1920px;
+  height: 1080px;
+  transform-origin: 0 0;
+}
+
+.stall {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* Placed and tilted from layout.json, so they sit square in the art. */
+.item,
+.price {
+  position: absolute;
+}
+
+/* A restocked box pops its new item in. */
+.item.pop {
+  animation: pop 0.45s cubic-bezier(0.3, 1.6, 0.5, 1);
+}
+
+@keyframes pop {
+  from {
+    scale: 0.5;
+    opacity: 0;
+  }
+}

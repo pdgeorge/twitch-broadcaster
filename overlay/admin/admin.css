@@ -517,6 +517,47 @@ section > .dropzone:first-child {
   padding-right: 8px;
 }
 
+/* Shop: the stall's three boxes side by side, then the /shop page itself. */
+.shop-boxes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.shop-box .doll {
+  aspect-ratio: 4 / 3;
+}
+
+.empty-box {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.shop-box .with-unit input[type='number'] {
+  width: 110px;
+}
+
+.card.saved {
+  animation: saved 1s ease-out;
+}
+
+.shop-preview {
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.shop-preview iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
 /* Party guide: a reference sheet, how it runs on the left and the commands
    on the right. */
 .guide {
@@ -647,6 +688,12 @@ section > .dropzone:first-child {
   }
 }
 
+@media (max-width: 720px) {
+  .shop-boxes {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 520px) {
   .topbar,
   main {
@@ -681,6 +728,7 @@ section > .dropzone:first-child {
 
 @media (prefers-reduced-motion: reduce) {
   .row.saved,
+  .card.saved,
   .toast {
     animation: none;
   }
