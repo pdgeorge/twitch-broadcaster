@@ -11,11 +11,12 @@
     <header class="topbar">
       <div>
         <h1>Overlay admin</h1>
-        <p class="subtitle">Sound commands, Dabling cosmetics and a guide to the party game. Changes are live on stream straight away.</p>
+        <p class="subtitle">Sound commands, Dabling cosmetics, Dabi's shop and a guide to the party game. Changes are live on stream straight away.</p>
       </div>
       <nav class="tabs" role="tablist" aria-label="Sections">
         <button type="button" role="tab" data-tab="sounds">Sounds</button>
         <button type="button" role="tab" data-tab="cosmetics">Cosmetics</button>
+        <button type="button" role="tab" data-tab="shop">Shop</button>
         <button type="button" role="tab" data-tab="guide">Party guide</button>
       </nav>
     </header>
@@ -71,8 +72,33 @@
         <div class="section-head">
           <h2>Cosmetics <span class="count" data-cosmetic-count></span></h2>
           <p class="hint">Hand them out in chat with <code>!give &lt;name&gt; &lt;cosmetic&gt;</code>.</p>
+          <p class="hint">To draw a new one, start from <a href="/assets/DablingTemplate.ora" download>the template</a>, which opens with its layers ready in Krita or GIMP, or put <a href="/assets/Dabling.png" download>Dabling.png</a> under your drawing in any other app. Keep the 500×600 canvas, draw only what shows on top of the Dabling, and export just your item as a transparent PNG. Shirts go in torso and hats in head, and a Dabling wears one item per slot, so a hat replaces the mane.</p>
         </div>
         <div class="grid" data-cosmetic-grid></div>
+      </section>
+
+      <section data-panel="shop" role="tabpanel" aria-label="Shop" hidden>
+        <div class="section-head">
+          <h2>Dabi's shop</h2>
+          <p class="hint">What the three boxes on Dabi's stall sell, and what each item costs in channel points. Changes show on <a href="/shop/" target="_blank" rel="noopener">/shop</a> straight away. A new item starts at <span data-shop-default>300</span>, and an item keeps its price when it leaves the shop and comes back.</p>
+        </div>
+        <p class="shop-status" data-shop-status></p>
+        <div class="shop-boxes" data-shop-boxes></div>
+        <label class="shop-thanks">
+          <input type="checkbox" data-shop-thanks disabled>
+          <span>
+            <span class="shop-thanks-title">Dabi thanks buyers</span>
+            <span class="hint">Out loud, by name, with something about what they bought. Switch it off if it ever gets too much.</span>
+          </span>
+        </label>
+
+        <div class="section-head">
+          <h2>Preview</h2>
+          <p class="hint">The /shop page, the browser source for the Dabi-Shop scene (1920×1080). Dabi sits on the stool, in OBS, on top of it.</p>
+        </div>
+        <div class="shop-preview">
+          <iframe src="/shop/" title="The /shop page" loading="lazy"></iframe>
+        </div>
       </section>
 
       <section data-panel="guide" role="tabpanel" aria-label="Party guide" hidden>

@@ -22,10 +22,11 @@ import (
 	"time"
 )
 
-// The /admin page manages sound commands and the cosmetic catalog from a
-// browser, so adding or swapping a file never means SSHing into the Pi. The
-// page itself is static (overlay/admin/, so a git pull updates it like the
-// overlay); this is the JSON API behind it, under /admin/api/.
+// The /admin page manages sound commands, the cosmetic catalog and what Dabi's
+// shop sells from a browser, so adding or swapping a file never means SSHing
+// into the Pi. The page itself is static (overlay/admin/, so a git pull
+// updates it like the overlay); this is the JSON API behind it, under
+// /admin/api/.
 //
 // It's built for the LAN/Tailscale: there's no login unless ADMIN_PASSWORD is
 // set, and then the browser asks for it (any username) via basic auth.
@@ -86,6 +87,7 @@ type adminServer struct {
 	botCommands  *botCommandStore
 	party        *partyManager
 	tavern       *tavernManager
+	shop         *shopStore
 }
 
 func (a *adminServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -173,6 +175,11 @@ func (a *adminServer) route(w http.ResponseWriter, r *http.Request) (any, error)
 
 	case "GET guide":
 		return a.guideState(), nil
+
+	case "GET shop":
+		return a.shop.adminState(), nil
+	case "PUT shop":
+		return a.setShop(w, r)
 	}
 	return nil, notFound("no such endpoint: %s %s", r.Method, r.URL.Path)
 }
@@ -254,6 +261,15 @@ type cosmeticView struct {
 	URL  string `json:"url"`
 }
 
+// overlayURL makes a cosmetic's src, which is relative to the overlay page at
+// /, work from pages that live elsewhere (/admin/, /shop/).
+func overlayURL(src string) string {
+	if !strings.HasPrefix(src, "/") && !strings.Contains(src, "://") {
+		return "/" + src
+	}
+	return src
+}
+
 // cosmeticState is the whole catalog as the page draws it. Every write returns
 // it too, so the page simply redraws.
 func (a *adminServer) cosmeticState() any {
@@ -261,13 +277,7 @@ func (a *adminServer) cosmeticState() any {
 	items := make([]cosmeticView, 0, len(cat.Items))
 	for _, id := range cat.ids() {
 		item := cat.Items[id]
-		// src is relative to the overlay page at /, which isn't where this
-		// page lives.
-		url := item.Src
-		if !strings.HasPrefix(url, "/") && !strings.Contains(url, "://") {
-			url = "/" + url
-		}
-		items = append(items, cosmeticView{ID: id, Slot: item.Slot, Src: item.Src, URL: url})
+		items = append(items, cosmeticView{ID: id, Slot: item.Slot, Src: item.Src, URL: overlayURL(item.Src)})
 	}
 	slots := cat.Slots
 	if slots == nil {
@@ -281,8 +291,8 @@ func (a *adminServer) cosmeticState() any {
 	}
 }
 
-// redrawOverlay re-sends the party cards and the tavern roster, so an edited
-// cosmetic shows on stream without waiting for anyone to chat.
+// redrawOverlay re-sends the party cards, the tavern roster and the shop, so
+// an edited cosmetic shows on stream without waiting for anyone to chat.
 func (a *adminServer) redrawOverlay() {
 	if a.party != nil {
 		a.party.notifyChange()
@@ -290,6 +300,33 @@ func (a *adminServer) redrawOverlay() {
 	if a.tavern != nil {
 		a.tavern.redraw()
 	}
+	if a.shop != nil {
+		a.shop.broadcast()
+	}
+}
+
+// setShop takes JSON {boxes: [{item, price}, ...]} to restock, one entry per
+// box with "" as the item for an empty box, and/or {thanks: true|false} to
+// switch Dabi's thank-yous to buyers.
+func (a *adminServer) setShop(w http.ResponseWriter, r *http.Request) (any, error) {
+	var req struct {
+		Boxes  []shopBox `json:"boxes"`
+		Thanks *bool     `json:"thanks"`
+	}
+	if err := readJSON(w, r, &req); err != nil {
+		return nil, err
+	}
+	if req.Boxes != nil || req.Thanks == nil {
+		if err := a.shop.set(r.Context(), req.Boxes); err != nil {
+			return nil, err
+		}
+	}
+	if req.Thanks != nil {
+		if err := a.shop.setThanks(*req.Thanks); err != nil {
+			return nil, err
+		}
+	}
+	return a.shop.adminState(), nil
 }
 
 // addCosmetic takes a multipart form: id, slot and file.

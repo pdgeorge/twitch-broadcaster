@@ -11,11 +11,15 @@ venv
 *.mp3
 *.wav
 test*
+# ...but not the receiver's tests
+!twitch_receiver/tests/
+!twitch_receiver/tests/*.py
 *.kra
 *.png
 !resources/*.png
 !overlay/assets/*.png
 !overlay/assets/cosmetics/*.png
+!overlay/shop/*.png
 
 # Go build artifact (go build in overlay_controller/ drops the binary here)
 overlay_controller/overlay_controller

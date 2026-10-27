@@ -56,6 +56,8 @@ services:
       OVERLAY_STATIC_DIR: /app/overlay
       OVERLAY_DATA_DIR: /data
       TTS_SERVICE_URL: http://tts_service:8081
+      # pd-streamdeck joins this network, so the shop can switch OBS and the music through it
+      DECK_URL: ${DECK_URL:-http://pd-streamdeck:8095}
     volumes:
       - ./overlay:/app/overlay:ro
       - ./data:/data

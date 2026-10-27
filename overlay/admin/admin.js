@@ -419,6 +419,7 @@
         : [el('p', { class: 'empty' }, 'No cosmetics yet. Drop some PNGs above.')]),
     );
     stagedCosmetics.forEach((card) => card.refreshSlots());
+    if (shop) loadShop().catch(fail); // what the shop can sell, and its pictures, follow the catalog
   }
 
   // doll stacks a cosmetic over the untinted base sprite, like the overlay.
@@ -647,6 +648,101 @@
     }
   });
 
+  // ---- Shop ----
+
+  const shopBoxes = document.querySelector('[data-shop-boxes]');
+  const shopDefault = document.querySelector('[data-shop-default]');
+  const shopStatus = document.querySelector('[data-shop-status]');
+  const shopThanks = document.querySelector('[data-shop-thanks]');
+  const MAX_PRICE = 1000000;
+  let shop = null; // what the server last confirmed
+
+  async function loadShop() {
+    renderShop(await api('GET', 'shop'));
+  }
+
+  function renderShop(state) {
+    shop = state;
+    shopDefault.textContent = state.default_price;
+    shopStatus.classList.toggle('open', state.open);
+    shopStatus.textContent = state.open
+      ? `The shop is open: chat buys with the "Buy item" rewards, one per box with something in it, up to ${state.max_per_stream} of each per chatter per stream. !closeshop in chat closes it.`
+      : 'The shop is closed. !openshop in chat (from you) opens it and switches on a "Buy item" reward for each box with something in it.';
+    shopThanks.checked = state.thanks;
+    shopThanks.disabled = false;
+    shopBoxes.replaceChildren(...state.boxes.map(shopBoxCard));
+  }
+
+  shopThanks.addEventListener('change', async () => {
+    try {
+      renderShop(await api('PUT', 'shop', { thanks: shopThanks.checked }));
+      toast(shop.thanks ? 'Dabi will thank buyers.' : "Dabi won't thank buyers.");
+    } catch (err) {
+      renderShop(shop);
+      fail(err);
+    }
+  });
+
+  // Every change sends all three boxes, so the controller checks the stall as
+  // a whole (one item can't be in two boxes).
+  async function saveShop(index, change) {
+    const boxes = shop.boxes.map((box) => ({ item: box.item, price: box.price || 0 }));
+    boxes[index] = { ...boxes[index], ...change };
+    try {
+      renderShop(await api('PUT', 'shop', { boxes }));
+      flash(shopBoxes.children[index]);
+    } catch (err) {
+      renderShop(shop);
+      fail(err);
+    }
+  }
+
+  function shopBoxCard(box, index) {
+    const items = new Map(shop.items.map((item) => [item.id, item]));
+    const select = el('select', { 'aria-label': `What box ${index + 1} sells` },
+      el('option', { value: '' }, 'Nothing'),
+      ...shop.items.map((item) => el('option', { value: item.id }, item.id)));
+    select.value = box.item;
+    const price = el('input', {
+      type: 'number',
+      min: 1,
+      max: MAX_PRICE,
+      step: 1,
+      value: box.item ? box.price : '',
+      disabled: !box.item,
+      inputMode: 'numeric',
+      'aria-label': `Price of box ${index + 1}`,
+    });
+
+    // A newly picked item comes in at its own price: the default, or what it
+    // cost the last time it was in the shop.
+    select.addEventListener('change', () => {
+      const item = items.get(select.value);
+      saveShop(index, { item: select.value, price: item ? item.price : 0 });
+    });
+    price.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') price.blur();
+    });
+    price.addEventListener('change', () => {
+      const points = Number(price.value);
+      if (!Number.isInteger(points) || points < 1 || points > MAX_PRICE) {
+        fail(new Error(`Prices are whole channel points, from 1 to ${MAX_PRICE.toLocaleString()}`));
+        price.value = box.price;
+        return;
+      }
+      saveShop(index, { price: points });
+    });
+
+    return el('article', { class: 'card shop-box' },
+      box.item ? doll(box.url) : el('div', { class: 'doll empty-box' }, 'Empty'),
+      el('div', { class: 'card-body' },
+        el('h3', { class: 'card-title' }, `Box ${index + 1}`),
+        el('label', { class: 'field' }, el('span', { class: 'label' }, 'Sells'), select),
+        el('label', { class: 'field' },
+          el('span', { class: 'label' }, 'Price'),
+          el('span', { class: 'with-unit' }, price, el('span', { class: 'unit' }, 'points')))));
+  }
+
   // ---- Party guide ----
 
   // The words live in the page and the numbers come from the controller, so
@@ -723,5 +819,6 @@
   dropzone(document.querySelector('[data-cosmetic-drop]'), stageCosmetics);
   loadSounds().catch(fail);
   loadCosmetics().catch(fail);
+  loadShop().catch(fail);
   loadGuide().catch(fail);
 })();

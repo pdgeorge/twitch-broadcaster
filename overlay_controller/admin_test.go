@@ -65,6 +65,7 @@ func testAdmin(t *testing.T, password string) (*adminServer, string) {
 		cosmeticsDir: cosmeticsDir,
 		party:        newPartyManager(hub, cosmetics),
 		tavern:       newTavernManager(hub, cosmetics),
+		shop:         newShopStore(filepath.Join(dir, shopFile), hub, cosmetics, nil),
 	}, cosmeticsDir
 }
 
