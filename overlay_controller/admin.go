@@ -305,17 +305,26 @@ func (a *adminServer) redrawOverlay() {
 	}
 }
 
-// setShop takes JSON {boxes: [{item, price}, ...]}, one entry per box, with
-// "" as the item for an empty box.
+// setShop takes JSON {boxes: [{item, price}, ...]} to restock, one entry per
+// box with "" as the item for an empty box, and/or {thanks: true|false} to
+// switch Dabi's thank-yous to buyers.
 func (a *adminServer) setShop(w http.ResponseWriter, r *http.Request) (any, error) {
 	var req struct {
-		Boxes []shopBox `json:"boxes"`
+		Boxes  []shopBox `json:"boxes"`
+		Thanks *bool     `json:"thanks"`
 	}
 	if err := readJSON(w, r, &req); err != nil {
 		return nil, err
 	}
-	if err := a.shop.set(r.Context(), req.Boxes); err != nil {
-		return nil, err
+	if req.Boxes != nil || req.Thanks == nil {
+		if err := a.shop.set(r.Context(), req.Boxes); err != nil {
+			return nil, err
+		}
+	}
+	if req.Thanks != nil {
+		if err := a.shop.setThanks(*req.Thanks); err != nil {
+			return nil, err
+		}
 	}
 	return a.shop.adminState(), nil
 }

@@ -27,6 +27,10 @@ import (
 // open, the controller sends the receiver the state they should be in
 // (channel.command.sync_rewards) and the receiver makes Twitch match. A reward
 // is only on while the shop is open and its box has something in it.
+//
+// A sale also asks Dabi to thank the buyer out loud: the controller sends
+// dabi.shop.purchase to dabi_events, and DabiReborn's stream brain turns it
+// into something for him to say. The Shop tab can switch that off.
 
 const shopFile = "shop.json"
 
@@ -56,13 +60,17 @@ const shopMaxPerStream = 3
 // closed, which shouldn't happen: the rewards are switched off then.
 const shopClosedRefund = "How on earth did you manage to redeem while the shop was closed?! Take your points back but seriously, tell me"
 
+// shopThanksEvent asks Dabi to thank a buyer. It goes to dabi_events.
+const shopThanksEvent = "dabi.shop.purchase"
+
 // shopStock is shop.json. Prices are kept per item, so one that leaves the
 // shop comes back at the price it had.
 type shopStock struct {
-	Open   bool           `json:"open"`
-	Boxes  []string       `json:"boxes"`            // cosmetic ids, one per box; "" leaves it empty
-	Prices map[string]int `json:"prices"`           // by id; an item without one costs defaultShopPrice
-	Before *shopBefore    `json:"before,omitempty"` // the scene and music the open shop replaced
+	Open      bool           `json:"open"`
+	Boxes     []string       `json:"boxes"`                // cosmetic ids, one per box; "" leaves it empty
+	Prices    map[string]int `json:"prices"`               // by id; an item without one costs defaultShopPrice
+	Before    *shopBefore    `json:"before,omitempty"`     // the scene and music the open shop replaced
+	ThanksOff bool           `json:"thanks_off,omitempty"` // Dabi doesn't thank buyers
 }
 
 // shopBox is one box as the pages draw it. Item is "" for an empty box.
@@ -83,6 +91,7 @@ type shopStore struct {
 	hub       *overlayHub
 	cosmetics *cosmeticCatalogStore
 	commands  commandSender // nil leaves the rewards alone
+	dabi      commandSender // nil: Dabi doesn't hear about sales
 	stage     *shopStage    // nil leaves OBS and the music alone
 
 	mu    sync.Mutex
@@ -143,8 +152,9 @@ func (s *shopStore) boxes() []shopBox {
 	return out
 }
 
-// adminState is what the Shop tab draws: whether it's open, the boxes, every
-// item it could put in one, and the price each would go on sale at.
+// adminState is what the Shop tab draws: whether it's open, whether Dabi
+// thanks buyers, the boxes, every item it could put in one, and the price
+// each would go on sale at.
 func (s *shopStore) adminState() map[string]any {
 	boxes := s.boxes()
 	cat := s.cosmetics.get()
@@ -156,6 +166,7 @@ func (s *shopStore) adminState() map[string]any {
 	}
 	return map[string]any{
 		"open":           s.stock.Open,
+		"thanks":         !s.stock.ThanksOff,
 		"boxes":          boxes,
 		"items":          items,
 		"default_price":  defaultShopPrice,
@@ -206,7 +217,7 @@ func (s *shopStore) set(ctx context.Context, boxes []shopBox) error {
 	}
 
 	s.mu.Lock()
-	next.Open, next.Before = s.stock.Open, s.stock.Before
+	next.Open, next.Before, next.ThanksOff = s.stock.Open, s.stock.Before, s.stock.ThanksOff
 	for id, price := range s.stock.Prices {
 		if _, set := next.Prices[id]; !set {
 			next.Prices[id] = price
@@ -237,6 +248,15 @@ func (s *shopStore) setOpen(ctx context.Context, open bool) error {
 	}
 	s.syncRewards(ctx)
 	return nil
+}
+
+// setThanks switches Dabi's thank-yous to buyers on or off, and saves that.
+func (s *shopStore) setThanks(on bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := s.stock
+	next.ThanksOff = !on
+	return s.saveLocked(next)
 }
 
 // setBefore remembers what the shop replaced in OBS, for !closeshop to put back.
@@ -334,6 +354,32 @@ func (s *shopStore) sell(c *character, box, cost int) (item, refusal string) {
 	return id, ""
 }
 
+// thank asks Dabi to thank a buyer out loud for item, unless the Shop tab
+// switched that off. name is how chat sees them, copies how many of item they
+// have now, and cost what they paid.
+func (s *shopStore) thank(ctx context.Context, name, login, item string, copies, cost int) {
+	s.mu.Lock()
+	off := s.stock.ThanksOff
+	s.mu.Unlock()
+	if off || s.dabi == nil {
+		return
+	}
+	slot := ""
+	if _, entry, ok := s.cosmetics.get().lookup(item); ok {
+		slot = entry.Slot
+	}
+	if err := s.dabi.publish(ctx, shopThanksEvent, map[string]any{
+		"user_name":  name,
+		"user_login": login,
+		"item":       item,
+		"slot":       slot,
+		"copies":     copies,
+		"cost":       cost,
+	}); err != nil {
+		log.Printf("shop: failed to ask Dabi to thank %s: %v", login, err)
+	}
+}
+
 // openMessage tells chat what's for sale, and how to buy it.
 func (s *shopStore) openMessage() string {
 	var stock, rewards []string
@@ -379,8 +425,8 @@ func handleShopCommand(ctx context.Context, event map[string]any, lower string, 
 }
 
 // handleShopRedeem settles a "Buy item" redemption: the item goes in the
-// buyer's wardrobe and the redemption is marked fulfilled, or their points
-// go back and chat hears why.
+// buyer's wardrobe, the redemption is marked fulfilled and Dabi thanks them,
+// or their points go back and chat hears why.
 func handleShopRedeem(ctx context.Context, event map[string]any, box int, shop *shopStore, characters *characterStore, party *partyManager, commands commandSender) {
 	userID := firstString(event["user_id"], "")
 	userLogin := firstString(event["user_login"], event["user_name"], userID)
@@ -442,9 +488,10 @@ func handleShopRedeem(ctx context.Context, event map[string]any, box int, shop *
 	log.Printf("shop: %s bought %s for %d points (now has %d)", c.Name, item, int(cost), copies)
 	if copies > 1 {
 		settle("FULFILLED", fmt.Sprintf("bought another %s! You have %d now.", item, copies))
-		return
+	} else {
+		settle("FULFILLED", fmt.Sprintf("bought %s! Type !equip %s to wear it.", item, item))
 	}
-	settle("FULFILLED", fmt.Sprintf("bought %s! Type !equip %s to wear it.", item, item))
+	shop.thank(opCtx, firstString(event["user_name"], userLogin), userLogin, item, copies, int(cost))
 }
 
 // broadcast redraws /shop.

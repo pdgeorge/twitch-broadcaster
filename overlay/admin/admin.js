@@ -653,6 +653,7 @@
   const shopBoxes = document.querySelector('[data-shop-boxes]');
   const shopDefault = document.querySelector('[data-shop-default]');
   const shopStatus = document.querySelector('[data-shop-status]');
+  const shopThanks = document.querySelector('[data-shop-thanks]');
   const MAX_PRICE = 1000000;
   let shop = null; // what the server last confirmed
 
@@ -667,8 +668,20 @@
     shopStatus.textContent = state.open
       ? `The shop is open: chat buys with the "Buy item" rewards, one per box with something in it, up to ${state.max_per_stream} of each per chatter per stream. !closeshop in chat closes it.`
       : 'The shop is closed. !openshop in chat (from you) opens it and switches on a "Buy item" reward for each box with something in it.';
+    shopThanks.checked = state.thanks;
+    shopThanks.disabled = false;
     shopBoxes.replaceChildren(...state.boxes.map(shopBoxCard));
   }
+
+  shopThanks.addEventListener('change', async () => {
+    try {
+      renderShop(await api('PUT', 'shop', { thanks: shopThanks.checked }));
+      toast(shop.thanks ? 'Dabi will thank buyers.' : "Dabi won't thank buyers.");
+    } catch (err) {
+      renderShop(shop);
+      fail(err);
+    }
+  });
 
   // Every change sends all three boxes, so the controller checks the stall as
   // a whole (one item can't be in two boxes).

@@ -151,7 +151,8 @@ select {
   min-width: 0;
 }
 
-input[type='range'] {
+input[type='range'],
+input[type='checkbox'] {
   padding: 0;
   border: 0;
   background: transparent;
@@ -517,8 +518,8 @@ section > .dropzone:first-child {
   padding-right: 8px;
 }
 
-/* Shop: whether it's open, the stall's three boxes side by side, then the
-   /shop page itself. */
+/* Shop: whether it's open, the stall's three boxes side by side, the switch
+   for Dabi's thank-yous, then the /shop page itself. */
 .shop-status {
   margin: 0 0 14px;
   padding: 10px 14px;
@@ -553,6 +554,34 @@ section > .dropzone:first-child {
 
 .shop-box .with-unit input[type='number'] {
   width: 110px;
+}
+
+.shop-thanks {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.shop-thanks input {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin: 2px 0 0;
+  cursor: pointer;
+}
+
+.shop-thanks-title {
+  font-weight: 600;
+}
+
+.shop-thanks .hint {
+  display: block;
 }
 
 .card.saved {

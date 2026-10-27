@@ -37,6 +37,7 @@ type config struct {
 	rabbitURL       string
 	rabbitExchange  string
 	commandExchange string
+	dabiExchange    string // where DabiReborn's stream brain listens
 	queueName       string
 	httpPort        string
 	staticDir       string
@@ -97,10 +98,11 @@ type chatLogStore struct {
 }
 
 type commandPublisher struct {
-	url      string
-	exchange string
-	conn     *amqp.Connection
-	channel  *amqp.Channel
+	url        string
+	exchange   string
+	expiration string // per-message TTL in milliseconds; "" keeps messages until they're read
+	conn       *amqp.Connection
+	channel    *amqp.Channel
 }
 
 const dailyLoginRewardTitle = "daily login bonus"
@@ -180,6 +182,21 @@ func newCommandPublisher(cfg config) *commandPublisher {
 	}
 }
 
+// dabiEventTTL is how long what the controller tells Dabi stays worth saying.
+// If his brain isn't running, RabbitMQ drops it after this, rather than Dabi
+// thanking someone for a purchase whenever he next starts.
+const dabiEventTTL = 2 * time.Minute
+
+// newDabiPublisher publishes to dabi_events, where DabiReborn's stream brain
+// listens. The shop asks Dabi to thank buyers there.
+func newDabiPublisher(cfg config) *commandPublisher {
+	return &commandPublisher{
+		url:        cfg.rabbitURL,
+		exchange:   cfg.dabiExchange,
+		expiration: strconv.FormatInt(dabiEventTTL.Milliseconds(), 10),
+	}
+}
+
 func (p *commandPublisher) ensureConnected() error {
 	if p.conn != nil && !p.conn.IsClosed() && p.channel != nil && !p.channel.IsClosed() {
 		return nil
@@ -218,6 +235,7 @@ func (p *commandPublisher) publish(ctx context.Context, eventType string, payloa
 	err = p.channel.PublishWithContext(ctx, p.exchange, "", false, false, amqp.Publishing{
 		ContentType: "application/json",
 		Type:        eventType,
+		Expiration:  p.expiration,
 		Body:        body,
 	})
 	if err != nil {
@@ -1771,6 +1789,9 @@ func main() {
 	tavern := newTavernManager(hub, cosmetics)
 	sounds := newSoundBoard(soundsDir, hub)
 	shop := newShopStore(filepath.Join(cfg.dataDir, shopFile), hub, cosmetics, commandPublisher)
+	dabiEvents := newDabiPublisher(cfg)
+	defer dabiEvents.close()
+	shop.dabi = dabiEvents
 	var deck *deckClient
 	if cfg.deckURL == "" {
 		log.Print("shop: DECK_URL isn't set, so !openshop won't switch the OBS scene or the music")
@@ -1836,6 +1857,7 @@ func loadConfig() config {
 		rabbitURL:       env("RABBITMQ_URL", "amqp://guest:guest@twitch_broadcaster:5672/"),
 		rabbitExchange:  env("RABBITMQ_EXCHANGE", "twitch_events"),
 		commandExchange: env("RABBITMQ_COMMAND_EXCHANGE", "twitch_commands"),
+		dabiExchange:    env("DABI_EXCHANGE", "dabi_events"),
 		queueName:       env("OVERLAY_QUEUE", "overlay_chat"),
 		httpPort:        env("OVERLAY_HTTP_PORT", "8080"),
 		staticDir:       env("OVERLAY_STATIC_DIR", "./overlay"),

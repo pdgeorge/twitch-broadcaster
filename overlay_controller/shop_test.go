@@ -196,6 +196,12 @@ func TestAdminShop(t *testing.T) {
 	if code != http.StatusBadRequest || !strings.Contains(state["error"].(string), "cape") {
 		t.Errorf("PUT unknown item = %d %v, want a 400 naming it", code, state)
 	}
+
+	// The thank-yous switch on its own leaves the boxes alone.
+	code, state = call(t, a, http.MethodPut, "/admin/api/shop", strings.NewReader(`{"thanks":false}`), "application/json")
+	if code != http.StatusOK || state["thanks"] != false || state["boxes"].([]any)[0].(map[string]any)["item"] != "hat" {
+		t.Errorf("PUT thanks off = %d %v, want thanks off and hat still in box 1", code, state)
+	}
 }
 
 // fakeSender records what the shop sends the receiver instead of publishing it.
@@ -356,6 +362,47 @@ func TestShopSell(t *testing.T) {
 	// A second one is fine: items can be doubled up.
 	if item, why := s.sell(c, 1, 450); item != "shirtA" || why != "" || copiesOf(c, "shirtA") != 2 {
 		t.Errorf("buying it again: %q, %q, wardrobe %v; want a second shirtA", item, why, c.Cosmetics)
+	}
+}
+
+// A sale asks Dabi to thank the buyer, unless the Shop tab switched that off,
+// and the switch stays put through a restock and a restart.
+func TestShopThanks(t *testing.T) {
+	s, _, path := testSellingShop(t)
+	ctx := context.Background()
+	dabi := &fakeSender{}
+	s.dabi = dabi
+	if s.adminState()["thanks"] != true {
+		t.Fatal("a new shop has Dabi's thank-yous off, want on")
+	}
+
+	s.thank(ctx, "Hez", "hez", "tophat", 2, 450)
+	want := []map[string]any{{"user_name": "Hez", "user_login": "hez", "item": "tophat", "slot": "head", "copies": float64(2), "cost": float64(450)}}
+	if got := dabi.take(shopThanksEvent); !reflect.DeepEqual(got, want) {
+		t.Errorf("thanking Hez sent %v, want %v", got, want)
+	}
+
+	if err := s.setThanks(false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.set(ctx, []shopBox{{Item: "shirtA", Price: 450}, {}, {}}); err != nil {
+		t.Fatal(err)
+	}
+	s.thank(ctx, "Hez", "hez", "shirtA", 1, 450)
+	if got := dabi.take(shopThanksEvent); len(got) != 0 {
+		t.Errorf("with the thank-yous off, sent %v", got)
+	}
+	reloaded := newShopStore(path, newOverlayHub(), testCatalogStore(t, testCatalogJSON), nil)
+	if reloaded.adminState()["thanks"] != false {
+		t.Error("the thank-yous came back on after a restart")
+	}
+
+	if err := s.setThanks(true); err != nil {
+		t.Fatal(err)
+	}
+	s.thank(ctx, "Hez", "hez", "shirtA", 1, 450)
+	if got := dabi.take(shopThanksEvent); len(got) != 1 {
+		t.Errorf("switched back on, sent %d thank-yous, want 1", len(got))
 	}
 }
 
