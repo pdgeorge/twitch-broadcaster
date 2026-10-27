@@ -467,3 +467,52 @@ func TestShopOpenMessage(t *testing.T) {
 		t.Errorf("three boxes: %q", got)
 	}
 }
+
+// !openshop sends Dabi to the stool and !closeshop sends him home; a chatter
+// can't move him.
+func TestShopWalksDabi(t *testing.T) {
+	s, f, _ := testSellingShop(t)
+	ctx := context.Background()
+	dabi := &fakeSender{}
+	s.dabi = dabi
+	s.stool = &shopStool{X: 1682, Y: 859, Seat: 210}
+	from := func(chatter string) map[string]any {
+		return map[string]any{"broadcaster_user_id": "100", "chatter_user_id": chatter, "chatter_user_login": "someone"}
+	}
+
+	handleShopCommand(ctx, from("200"), "!openshop", s, f)
+	if got := dabi.take(shopWalkEvent); len(got) != 0 {
+		t.Errorf("a chatter's !openshop sent Dabi %v", got)
+	}
+	handleShopCommand(ctx, from("100"), "!openshop", s, f)
+	if got, want := dabi.take(shopWalkEvent), []map[string]any{{"x": float64(1682), "y": float64(859), "seat": float64(210)}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("!openshop sent %v, want %v", got, want)
+	}
+	handleShopCommand(ctx, from("100"), "!closeshop", s, f)
+	if got, want := dabi.take(shopWalkEvent), []map[string]any{{"home": true}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("!closeshop sent %v, want %v", got, want)
+	}
+
+	s.stool = nil
+	handleShopCommand(ctx, from("100"), "!openshop", s, f)
+	if got := dabi.take(shopWalkEvent); len(got) != 0 {
+		t.Errorf("with no stool spot, !openshop sent Dabi %v", got)
+	}
+}
+
+// The stool's spot comes from the stall art's layout.json.
+func TestLoadShopStool(t *testing.T) {
+	if got, want := loadShopStool(filepath.Join("..", "overlay", "shop", "layout.json")), (&shopStool{X: 1682, Y: 859, Seat: 210}); !reflect.DeepEqual(got, want) {
+		t.Errorf("the stall's stool = %+v, want %+v", got, want)
+	}
+	if got := loadShopStool(filepath.Join(t.TempDir(), "missing.json")); got != nil {
+		t.Errorf("no layout.json gave %+v, want nil", got)
+	}
+	old := filepath.Join(t.TempDir(), "layout.json")
+	if err := os.WriteFile(old, []byte(`{"size": [1920, 1080], "boxes": []}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadShopStool(old); got != nil {
+		t.Errorf("a layout without the stool gave %+v, want nil", got)
+	}
+}

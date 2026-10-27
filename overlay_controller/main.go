@@ -1792,6 +1792,7 @@ func main() {
 	dabiEvents := newDabiPublisher(cfg)
 	defer dabiEvents.close()
 	shop.dabi = dabiEvents
+	shop.stool = loadShopStool(filepath.Join(cfg.staticDir, "shop", "layout.json"))
 	var deck *deckClient
 	if cfg.deckURL == "" {
 		log.Print("shop: DECK_URL isn't set, so !openshop won't switch the OBS scene or the music")

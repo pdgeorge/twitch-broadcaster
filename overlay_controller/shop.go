@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strings"
@@ -31,6 +32,11 @@ import (
 // A sale also asks Dabi to thank the buyer out loud: the controller sends
 // dabi.shop.purchase to dabi_events, and DabiReborn's stream brain turns it
 // into something for him to say. The Shop tab can switch that off.
+//
+// Dabi minds the shop from the stool beside the stall: !openshop sends
+// dabi.body to dabi_events with the stool's spot on the 1920x1080 page, and
+// DabiReborn's voice overlay walks his 3D body over and hops up; !closeshop
+// sends him home again.
 
 const shopFile = "shop.json"
 
@@ -63,6 +69,9 @@ const shopClosedRefund = "How on earth did you manage to redeem while the shop w
 // shopThanksEvent asks Dabi to thank a buyer. It goes to dabi_events.
 const shopThanksEvent = "dabi.shop.purchase"
 
+// shopWalkEvent sends Dabi to a spot on screen. It goes to dabi_events too.
+const shopWalkEvent = "dabi.body"
+
 // shopStock is shop.json. Prices are kept per item, so one that leaves the
 // shop comes back at the price it had.
 type shopStock struct {
@@ -92,6 +101,7 @@ type shopStore struct {
 	cosmetics *cosmeticCatalogStore
 	commands  commandSender // nil leaves the rewards alone
 	dabi      commandSender // nil: Dabi doesn't hear about sales
+	stool     *shopStool    // nil: Dabi stays put when the shop opens
 	stage     *shopStage    // nil leaves OBS and the music alone
 
 	mu    sync.Mutex
@@ -380,6 +390,53 @@ func (s *shopStore) thank(ctx context.Context, name, login, item string, copies,
 	}
 }
 
+// shopStool is where Dabi sits in the shop, in px on the 1920x1080 /shop
+// page: the middle of the stool's seat, and how far above the floor that is.
+type shopStool struct {
+	X, Y, Seat int
+}
+
+// loadShopStool reads the stool's spot from the stall's layout.json, which
+// tools/shop_stall.py writes alongside the art.
+func loadShopStool(path string) *shopStool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("shop: can't read %s, so Dabi won't walk to the stool: %v", path, err)
+		return nil
+	}
+	var layout struct {
+		Stool *struct {
+			X      float64 `json:"cx"`
+			Y      float64 `json:"y"`
+			FloorY float64 `json:"floor_y"`
+		} `json:"stool_seat"`
+	}
+	if err := json.Unmarshal(data, &layout); err != nil || layout.Stool == nil {
+		log.Printf("shop: %s has no stool_seat, so Dabi won't walk to the stool (%v)", path, err)
+		return nil
+	}
+	return &shopStool{
+		X:    int(math.Round(layout.Stool.X)),
+		Y:    int(math.Round(layout.Stool.Y)),
+		Seat: int(math.Round(math.Max(0, layout.Stool.FloorY-layout.Stool.Y))),
+	}
+}
+
+// walkDabi sends Dabi to the stool when the shop opens, and home when it
+// closes.
+func (s *shopStore) walkDabi(ctx context.Context, open bool) {
+	if s.dabi == nil || (open && s.stool == nil) {
+		return
+	}
+	payload, where := map[string]any{"home": true}, "home"
+	if open {
+		payload, where = map[string]any{"x": s.stool.X, "y": s.stool.Y, "seat": s.stool.Seat}, "to the stool"
+	}
+	if err := s.dabi.publish(ctx, shopWalkEvent, payload); err != nil {
+		log.Printf("shop: failed to send Dabi %s: %v", where, err)
+	}
+}
+
 // openMessage tells chat what's for sale, and how to buy it.
 func (s *shopStore) openMessage() string {
 	var stock, rewards []string
@@ -413,12 +470,13 @@ func handleShopCommand(ctx context.Context, event map[string]any, lower string, 
 	}
 	log.Printf("shop: open=%v", open)
 	shop.stage.queue(open)
+	opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	shop.walkDabi(opCtx, open)
 	message := "Dabi's shop is closed. Thanks for shopping!"
 	if open {
 		message = shop.openMessage()
 	}
-	opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
 	if err := commands.publish(opCtx, "channel.command.send_chat", map[string]any{"channel_id": broadcasterID, "message": message}); err != nil {
 		log.Printf("shop: failed to tell chat: %v", err)
 	}

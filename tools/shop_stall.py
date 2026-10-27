@@ -679,7 +679,8 @@ for b in boxes:
         "price": screen_rect(b['tag'].matrix_world, PT_W / 2, PT_H / 2, -0.006),           # the paper tag's face
     })
 seat = to_px((STOOL_C.x, STOOL_C.y, SEAT_TOP))
-layout["stool_seat"] = {"cx": round(seat[0]), "y": round(seat[1])}
+floor = to_px((STOOL_C.x, STOOL_C.y, 0))   # the ground under it: Dabi stands there, then hops up
+layout["stool_seat"] = {"cx": round(seat[0]), "y": round(seat[1]), "floor_y": round(floor[1])}
 with open(os.path.join(OUT_DIR, "layout.json"), "w") as f:
     json.dump(layout, f, indent=2)
 print("LAYOUT", json.dumps(layout))
