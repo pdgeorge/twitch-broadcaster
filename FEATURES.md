@@ -5,8 +5,8 @@ A one-page summary of what this stack does on stream, what the overlay is made o
 ## On stream
 
 - **Chat overlay**: Twitch chat in the top left, styled in `overlay/overlay.css`. Twitch, BTTV, FFZ and 7TV emotes all render. When a mod deletes a message, times out or bans someone, or clears chat, those lines come off the overlay too, along with any party TTS of them that hasn't finished.
-- **Dablings**: anyone who chats gets a Dabling on the tavern floor at the bottom of the screen. It wanders around until its chatter has been quiet for 30 minutes. Each chatter gets their own tint, and Dablings grow with level and wear their owner's cosmetics.
-- **Cosmetics**: chatters own items and wear one per slot (`!wardrobe`, `!equip`, `!unequip`). Mods hand them out and take them back with `!give` and `!take`. Add and edit them on `/admin`.
+- **Dablings**: anyone who chats gets a Dabling on the tavern floor at the bottom of the screen. It wanders around until its chatter has been quiet for 30 minutes. Each chatter gets their own tint, and Dablings grow with level and wear their owner's cosmetics. They're bald unless they wear something on their head, like the `mane`.
+- **Cosmetics**: chatters own items and wear one per slot (`!wardrobe`, `!equip`, `!unequip`). Mods hand them out and take them back with `!give` and `!take`. Add and edit them on `/admin`, which also links the template for drawing new ones.
 - **Sound commands**: `!buhee` and friends, each with its own cooldown shared by the whole chat. `!sounds` lists them. Managed on `/admin`.
 - **Login redeems**: "daily login bonus" and "first login bonus" each keep a count per chatter, and the bot replies with the new total. A chatter's first "first login bonus" also gives them the `bronze_first` shirt, the only automatic reward so far.
 - **Custom text commands**: mods add one with `#a !discord <reply>` and remove it with `#d !discord`. Anyone who types exactly `!discord` gets the reply.
