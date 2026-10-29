@@ -129,14 +129,20 @@ func (a *adminServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// route maps METHOD /admin/api/<resource>[/<name>[/<action>]] to a handler.
+// route maps METHOD /admin/api/<resource>[/<name>[/variants/<variant>][/<action>]]
+// to a handler.
 func (a *adminServer) route(w http.ResponseWriter, r *http.Request) (any, error) {
 	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/admin/api/"), "/"), "/")
 	shape := []string{r.Method, parts[0]}
-	var name string
+	var name, variant string
 	if len(parts) > 1 {
 		name = parts[1]
-		shape = append(append(shape, ":name"), parts[2:]...)
+		rest := parts[2:]
+		if len(rest) > 1 && rest[0] == "variants" && rest[1] != "" {
+			variant = rest[1]
+			rest = append([]string{"variants", ":variant"}, rest[2:]...)
+		}
+		shape = append(append(shape, ":name"), rest...)
 	}
 
 	switch strings.Join(shape, " ") {
@@ -156,9 +162,27 @@ func (a *adminServer) route(w http.ResponseWriter, r *http.Request) (any, error)
 		if err != nil {
 			return nil, err
 		}
-		return a.sounds.replace(name, audio)
+		return a.sounds.replace(name, "", audio)
 	case "POST sounds :name play":
-		return map[string]bool{"ok": true}, a.sounds.preview(name)
+		return map[string]bool{"ok": true}, a.sounds.preview(name, "")
+	case "POST sounds :name variants":
+		audio, err := readUpload(w, r, maxSoundUpload)
+		if err != nil {
+			return nil, err
+		}
+		return a.sounds.addVariant(name, audio)
+	case "PUT sounds :name variants :variant":
+		return a.updateVariant(w, r, name, variant)
+	case "DELETE sounds :name variants :variant":
+		return a.sounds.removeVariant(name, variant)
+	case "POST sounds :name variants :variant file":
+		audio, err := readUpload(w, r, maxSoundUpload)
+		if err != nil {
+			return nil, err
+		}
+		return a.sounds.replace(name, variant, audio)
+	case "POST sounds :name variants :variant play":
+		return map[string]bool{"ok": true}, a.sounds.preview(name, variant)
 
 	case "GET cosmetics":
 		return a.cosmeticState(), nil
@@ -228,13 +252,15 @@ func (a *adminServer) addSound(w http.ResponseWriter, r *http.Request) (any, err
 	return a.soundState()
 }
 
-// updateSound takes JSON {name, cooldown_seconds, volume}; a different name
-// renames the command.
+// updateSound takes JSON {name, cooldown_seconds, volume, chance}; a
+// different name renames the command, and chance (optional) is the main
+// file's, for a sound with variants.
 func (a *adminServer) updateSound(w http.ResponseWriter, r *http.Request, name string) (any, error) {
 	var req struct {
 		Name            string `json:"name"`
 		CooldownSeconds *int   `json:"cooldown_seconds"`
 		Volume          *int   `json:"volume"`
+		Chance          *int   `json:"chance"`
 	}
 	if err := readJSON(w, r, &req); err != nil {
 		return nil, err
@@ -251,7 +277,22 @@ func (a *adminServer) updateSound(w http.ResponseWriter, r *http.Request, name s
 			return nil, err
 		}
 	}
-	return a.sounds.update(name, newName, soundSettings{CooldownSeconds: *req.CooldownSeconds, Volume: *req.Volume})
+	return a.sounds.update(name, newName, soundSettings{CooldownSeconds: *req.CooldownSeconds, Volume: *req.Volume}, req.Chance)
+}
+
+// updateVariant takes JSON {volume, chance} for one of a sound's variants.
+func (a *adminServer) updateVariant(w http.ResponseWriter, r *http.Request, name, variant string) (any, error) {
+	var req struct {
+		Volume *int `json:"volume"`
+		Chance *int `json:"chance"`
+	}
+	if err := readJSON(w, r, &req); err != nil {
+		return nil, err
+	}
+	if req.Volume == nil || req.Chance == nil {
+		return nil, badRequest("send volume and chance")
+	}
+	return a.sounds.updateVariant(name, variant, *req.Volume, *req.Chance)
 }
 
 type cosmeticView struct {

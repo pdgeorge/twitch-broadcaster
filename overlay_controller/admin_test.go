@@ -188,6 +188,60 @@ func TestAdminSoundUpload(t *testing.T) {
 	}
 }
 
+// Variants are added, edited, played and deleted under their sound's path.
+func TestAdminSoundVariants(t *testing.T) {
+	a, _ := testAdmin(t, "")
+	body, ctype := upload(t, map[string]string{"name": "come"}, fakeWAV)
+	if status, state := call(t, a, http.MethodPost, "/admin/api/sounds", body, ctype); status != http.StatusOK {
+		t.Fatalf("upload = %d %v", status, state)
+	}
+	variant := func(s map[string]any) map[string]any {
+		t.Helper()
+		variants := s["variants"].([]any)
+		if len(variants) != 1 {
+			t.Fatalf("variants = %v, want one", variants)
+		}
+		return variants[0].(map[string]any)
+	}
+
+	body, ctype = upload(t, nil, fakeMP3)
+	status, s := call(t, a, http.MethodPost, "/admin/api/sounds/come/variants", body, ctype)
+	if v := variant(s); status != http.StatusOK || v["id"] != "2" || v["file"] != "come.2.mp3" || v["chance"] != 50.0 || s["chance"] != 50.0 {
+		t.Errorf("add variant = %d %v", status, s)
+	}
+
+	status, s = call(t, a, http.MethodPut, "/admin/api/sounds/come/variants/2", strings.NewReader(`{"volume":30,"chance":70}`), "application/json")
+	if v := variant(s); status != http.StatusOK || v["volume"] != 30.0 || v["chance"] != 70.0 {
+		t.Errorf("update variant = %d %v", status, s)
+	}
+	status, _ = call(t, a, http.MethodPut, "/admin/api/sounds/come/variants/2", strings.NewReader(`{"volume":30}`), "application/json")
+	if status != http.StatusBadRequest {
+		t.Errorf("PUT without a chance = %d, want 400", status)
+	}
+
+	status, s = call(t, a, http.MethodPut, "/admin/api/sounds/come", strings.NewReader(`{"name":"come","cooldown_seconds":5,"volume":100,"chance":30}`), "application/json")
+	if status != http.StatusOK || s["chance"] != 30.0 {
+		t.Errorf("main file's chance = %d %v, want 30", status, s)
+	}
+
+	if status, _ = call(t, a, http.MethodPost, "/admin/api/sounds/come/variants/2/play", nil, ""); status != http.StatusOK {
+		t.Errorf("play variant = %d", status)
+	}
+	if p := lastBroadcast(t, a.sounds.hub, "sound.play"); !strings.HasPrefix(p["url"].(string), "/sounds/come.2.mp3?v=") || p["volume"] != 0.3 {
+		t.Errorf("played %v, want variant 2 at 0.3", p)
+	}
+
+	status, s = call(t, a, http.MethodDelete, "/admin/api/sounds/come/variants/2", nil, "")
+	if status != http.StatusOK || len(s["variants"].([]any)) != 0 || s["chance"] != 100.0 {
+		t.Errorf("delete variant = %d %v, want come on its own", status, s)
+	}
+	for _, path := range []string{"/admin/api/sounds/come/variants/2", "/admin/api/sounds/come/variants//play"} {
+		if status, _ = call(t, a, http.MethodDelete, path, nil, ""); status != http.StatusNotFound {
+			t.Errorf("DELETE %s = %d, want 404", path, status)
+		}
+	}
+}
+
 func TestReadUploadLimit(t *testing.T) {
 	body, ctype := upload(t, nil, bytes.Repeat([]byte("x"), 100))
 	req := httptest.NewRequest(http.MethodPost, "/admin/api/sounds", body)
