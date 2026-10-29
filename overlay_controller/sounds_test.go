@@ -203,7 +203,7 @@ func TestSoundBoardEdits(t *testing.T) {
 	t.Run("replace can change format, keeping the settings", func(t *testing.T) {
 		b, dir := testSoundBoard(t)
 		b.add("buhee", fakeWAV, soundSettings{CooldownSeconds: 9, Volume: 70})
-		s, err := b.replace("buhee", fakeMP3)
+		s, err := b.replace("buhee", "", fakeMP3)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -220,7 +220,7 @@ func TestSoundBoardEdits(t *testing.T) {
 		b.add("buhee", fakeWAV, soundSettings{CooldownSeconds: 10, Volume: 100})
 		t0 := time.Now()
 		b.trigger("buhee", "alice", t0)
-		s, err := b.update("buhee", "boohee", soundSettings{CooldownSeconds: 10, Volume: 50})
+		s, err := b.update("buhee", "boohee", soundSettings{CooldownSeconds: 10, Volume: 50}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -240,7 +240,7 @@ func TestSoundBoardEdits(t *testing.T) {
 		b, _ := testSoundBoard(t)
 		b.add("buhee", fakeWAV, defaultSoundSettings())
 		b.add("punch", fakeMP3, defaultSoundSettings())
-		if _, err := b.update("buhee", "punch", defaultSoundSettings()); err == nil {
+		if _, err := b.update("buhee", "punch", defaultSoundSettings(), nil); err == nil {
 			t.Error("renamed buhee over punch")
 		}
 	})
@@ -277,5 +277,237 @@ func TestSoundListReply(t *testing.T) {
 	}
 	if got := soundListReply(many); len(got) > 500 || !strings.Contains(got, "more") {
 		t.Errorf("long reply is %d chars (Twitch caps at 500): %q", len(got), got)
+	}
+}
+
+// Variants: come.2.wav and come.3.wav beside come.wav are more files !come can
+// play, picked by chance under !come's one cooldown.
+func TestSoundVariantScan(t *testing.T) {
+	b, dir := testSoundBoard(t)
+	writeTestFile(t, filepath.Join(dir, "come.wav"), fakeWAV)
+	writeTestFile(t, filepath.Join(dir, "come.10.mp3"), fakeMP3)
+	writeTestFile(t, filepath.Join(dir, "come.2.mp3"), fakeMP3)
+	writeTestFile(t, filepath.Join(dir, "come.2.wav"), fakeWAV)   // a second variant 2: ignored
+	writeTestFile(t, filepath.Join(dir, "come.a b.wav"), fakeWAV) // not a variant name
+	writeTestFile(t, filepath.Join(dir, "come2.wav"), fakeWAV)    // no dot: a command of its own
+	writeTestFile(t, filepath.Join(dir, "gone.2.wav"), fakeWAV)   // no gone.wav to belong to
+	writeTestFile(t, filepath.Join(dir, soundSettingsFile), []byte(`{"come": {"cooldown_seconds": 9, "volume": 60}}`))
+
+	list, err := b.list()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 || list[0].Name != "come" || list[1].Name != "come2" {
+		t.Fatalf("sounds = %+v, want come and come2", list)
+	}
+	come := list[0]
+	var got []string
+	for _, v := range come.Variants {
+		got = append(got, v.ID+"="+v.File)
+	}
+	if !slices.Equal(got, []string{"2=come.2.mp3", "10=come.10.mp3"}) {
+		t.Errorf("come's variants = %v, want 2 then 10, one file each", got)
+	}
+	// Nothing saved for them: an even share each, as loud as the main file.
+	if got := chancesOf(come.files()); !slices.Equal(got, []int{34, 33, 33}) {
+		t.Errorf("chances = %v, want 34/33/33", got)
+	}
+	if come.Variants[0].Volume != 60 || !strings.HasPrefix(come.Variants[0].URL, "/sounds/come.2.mp3?v=") {
+		t.Errorf("variant 2 = %+v, want come's 60%% volume and its own url", come.Variants[0])
+	}
+	if list[1].Chance != 100 || len(list[1].Variants) != 0 {
+		t.Errorf("come2 = %+v, want a plain sound on a 100%% chance", list[1])
+	}
+}
+
+func TestSoundVariantPick(t *testing.T) {
+	b, dir := testSoundBoard(t)
+	for _, file := range []string{"come.wav", "come.2.wav", "come.3.wav"} {
+		writeTestFile(t, filepath.Join(dir, file), fakeWAV)
+	}
+	writeTestFile(t, filepath.Join(dir, soundSettingsFile), []byte(`{"come": {"cooldown_seconds": 0, "volume": 100, "chance": 50,
+		"variants": {"2": {"volume": 40, "chance": 30}, "3": {"chance": 20}}}}`))
+	for roll, want := range map[int]string{0: "come.wav", 49: "come.wav", 50: "come.2.wav", 79: "come.2.wav", 80: "come.3.wav", 99: "come.3.wav"} {
+		b.roll = func(n int) int {
+			if n != 100 {
+				t.Errorf("rolled out of %d, want 100", n)
+			}
+			return roll
+		}
+		if !b.trigger("come", "alice", time.Now()) {
+			t.Fatalf("roll %d: !come didn't play", roll)
+		}
+		payload := lastBroadcast(t, b.hub, "sound.play")
+		if !strings.HasPrefix(payload["url"].(string), "/sounds/"+want+"?v=") || payload["name"] != "come" {
+			t.Errorf("roll %d played %v, want %s", roll, payload, want)
+		}
+	}
+	// Each file at its own volume, and one left out of the file means full.
+	b.roll = func(int) int { return 50 }
+	b.trigger("come", "alice", time.Now())
+	if v := lastBroadcast(t, b.hub, "sound.play")["volume"]; v != 0.4 {
+		t.Errorf("variant 2 played at %v, want 0.4", v)
+	}
+	b.roll = func(int) int { return 99 }
+	b.trigger("come", "alice", time.Now())
+	if v := lastBroadcast(t, b.hub, "sound.play")["volume"]; v != 1.0 {
+		t.Errorf("variant 3 played at %v, want 1 (no volume saved)", v)
+	}
+}
+
+func TestSoundVariantsAllOnZero(t *testing.T) {
+	b, dir := testSoundBoard(t)
+	writeTestFile(t, filepath.Join(dir, "come.wav"), fakeWAV)
+	writeTestFile(t, filepath.Join(dir, "come.2.wav"), fakeWAV)
+	writeTestFile(t, filepath.Join(dir, soundSettingsFile), []byte(`{"come": {"chance": 0, "variants": {"2": {"chance": 0}}}}`))
+	if b.trigger("come", "alice", time.Now()) {
+		t.Error("!come played with every chance at 0")
+	}
+	if _, started := b.lastPlayed["come"]; started {
+		t.Error("a !come that didn't play started its cooldown")
+	}
+}
+
+func TestSoundVariantEdits(t *testing.T) {
+	chances := func(s sound) []int { return chancesOf(s.files()) }
+
+	t.Run("add numbers them and shares the chances out evenly", func(t *testing.T) {
+		b, dir := testSoundBoard(t)
+		b.add("come", fakeWAV, soundSettings{CooldownSeconds: 5, Volume: 70})
+		s, err := b.addVariant("come", fakeMP3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(s.Variants) != 1 || s.Variants[0].ID != "2" || s.Variants[0].File != "come.2.mp3" || s.Variants[0].Volume != 70 {
+			t.Fatalf("variants = %+v, want come.2.mp3 at the main file's 70%%", s.Variants)
+		}
+		if !slices.Equal(chances(s), []int{50, 50}) {
+			t.Errorf("chances = %v, want 50/50", chances(s))
+		}
+		s, _ = b.addVariant("come", fakeOGG)
+		if !slices.Equal(chances(s), []int{34, 33, 33}) || !fileExists(filepath.Join(dir, "come.3.ogg")) {
+			t.Errorf("chances = %v, want 34/33/33 with come.3.ogg", chances(s))
+		}
+	})
+
+	t.Run("a new variant keeps the others' proportions", func(t *testing.T) {
+		b, _ := testSoundBoard(t)
+		b.add("come", fakeWAV, defaultSoundSettings())
+		b.addVariant("come", fakeWAV)
+		b.updateVariant("come", "2", 100, 40)
+		chance := 60
+		b.update("come", "come", defaultSoundSettings(), &chance)
+		s, _ := b.addVariant("come", fakeWAV)
+		if !slices.Equal(chances(s), []int{40, 27, 33}) {
+			t.Errorf("chances = %v, want 60/40 squeezed to 40/27 to fit a new 33", chances(s))
+		}
+	})
+
+	t.Run("update saves one variant and leaves the rest", func(t *testing.T) {
+		b, _ := testSoundBoard(t)
+		b.add("come", fakeWAV, defaultSoundSettings())
+		b.addVariant("come", fakeWAV)
+		s, err := b.updateVariant("come", "2", 30, 80)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v := s.Variants[0]; v.Volume != 30 || v.Chance != 80 || s.Chance != 50 || s.Volume != 100 {
+			t.Errorf("sound = %+v, want variant 2 at 30%% volume, 80%% chance and the main file untouched", s)
+		}
+		if _, err := b.updateVariant("come", "2", 150, 10); err == nil {
+			t.Error("volume 150 was accepted")
+		}
+		if _, err := b.updateVariant("come", "9", 50, 10); err == nil {
+			t.Error("updated a variant that doesn't exist")
+		}
+		if _, err := b.updateVariant("come", "", 50, 10); err == nil {
+			t.Error("the main file was updated as a variant")
+		}
+	})
+
+	t.Run("remove shares its chance out, and the last one leaves a plain sound", func(t *testing.T) {
+		b, dir := testSoundBoard(t)
+		b.add("come", fakeWAV, defaultSoundSettings())
+		b.addVariant("come", fakeWAV)
+		b.addVariant("come", fakeWAV)
+		s, err := b.removeVariant("come", "3")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fileExists(filepath.Join(dir, "come.3.wav")) || !slices.Equal(chances(s), []int{51, 49}) {
+			t.Errorf("chances = %v, want 34/33 grown back to 51/49 and come.3.wav gone", chances(s))
+		}
+		s, _ = b.removeVariant("come", "2")
+		if len(s.Variants) != 0 || s.Chance != 100 {
+			t.Errorf("sound = %+v, want no variants", s)
+		}
+		raw, _ := os.ReadFile(filepath.Join(dir, soundSettingsFile))
+		if strings.Contains(string(raw), "chance") || strings.Contains(string(raw), "variants") {
+			t.Errorf("settings file = %s, want no chances left over", raw)
+		}
+		if _, err := b.removeVariant("come", "2"); err == nil {
+			t.Error("removed variant 2 twice")
+		}
+		if _, err := b.removeVariant("come", ""); err == nil {
+			t.Error("removed the main file as a variant")
+		}
+	})
+
+	t.Run("replace swaps one variant's file, keeping its settings", func(t *testing.T) {
+		b, dir := testSoundBoard(t)
+		b.add("come", fakeWAV, defaultSoundSettings())
+		b.addVariant("come", fakeWAV)
+		b.updateVariant("come", "2", 30, 50)
+		s, err := b.replace("come", "2", fakeOGG)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fileExists(filepath.Join(dir, "come.2.wav")) || s.Variants[0].File != "come.2.ogg" || s.Variants[0].Volume != 30 {
+			t.Errorf("variant 2 = %+v, want come.2.ogg at 30%% in place of come.2.wav", s.Variants[0])
+		}
+		if !fileExists(filepath.Join(dir, "come.wav")) {
+			t.Error("replacing a variant touched the main file")
+		}
+	})
+
+	t.Run("rename and delete take the variants along", func(t *testing.T) {
+		b, dir := testSoundBoard(t)
+		b.add("come", fakeWAV, defaultSoundSettings())
+		b.addVariant("come", fakeMP3)
+		b.updateVariant("come", "2", 30, 50)
+		s, err := b.update("come", "go", defaultSoundSettings(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.File != "go.wav" || len(s.Variants) != 1 || s.Variants[0].File != "go.2.mp3" || s.Variants[0].Volume != 30 {
+			t.Errorf("renamed to %+v, want go.wav and go.2.mp3 with its settings", s)
+		}
+		if fileExists(filepath.Join(dir, "come.wav")) || fileExists(filepath.Join(dir, "come.2.mp3")) {
+			t.Error("come's files are still there")
+		}
+		if err := b.remove("go"); err != nil {
+			t.Fatal(err)
+		}
+		if fileExists(filepath.Join(dir, "go.wav")) || fileExists(filepath.Join(dir, "go.2.mp3")) {
+			t.Error("deleting !go left files behind")
+		}
+	})
+}
+
+func TestSpreadChances(t *testing.T) {
+	for _, tc := range []struct {
+		in    []int
+		total int
+		want  []int
+	}{
+		{[]int{100}, 50, []int{50}},
+		{[]int{50, 50}, 67, []int{34, 33}},
+		{[]int{60, 40}, 67, []int{40, 27}},
+		{[]int{34, 33}, 100, []int{51, 49}},
+		{[]int{0, 0, 0}, 100, []int{34, 33, 33}},
+	} {
+		if got := spreadChances(tc.in, tc.total); !slices.Equal(got, tc.want) {
+			t.Errorf("spreadChances(%v, %d) = %v, want %v", tc.in, tc.total, got, tc.want)
+		}
 	}
 }

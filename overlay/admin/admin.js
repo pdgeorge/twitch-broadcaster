@@ -161,14 +161,29 @@
     soundCount.textContent = state.sounds.length ? `(${state.sounds.length})` : '';
     soundList.replaceChildren(
       ...(state.sounds.length
-        ? state.sounds.map(soundRow)
+        ? state.sounds.map(soundGroup)
         : [el('p', { class: 'empty' }, 'No sounds yet. Drop some files above.')]),
     );
   }
 
+  // volumeField builds a volume slider. The preview player follows it, so it
+  // sounds the way the stream will.
+  function volumeField(value, preview) {
+    const volume = el('input', { type: 'range', min: 0, max: 100, step: 1, value });
+    const volumeLabel = el('span', { class: 'volume-label' }, `${value}%`);
+    volume.addEventListener('input', () => {
+      volumeLabel.textContent = `${volume.value}%`;
+      preview.volume = volume.value / 100;
+    });
+    preview.volume = value / 100;
+    const cell = el('label', { class: 'cell field' },
+      el('span', { class: 'label' }, 'Volume'),
+      el('span', { class: 'with-unit' }, volume, volumeLabel));
+    return { volume, volumeLabel, cell };
+  }
+
   // soundControls builds the cooldown and volume fields that saved and staged
-  // rows share. The preview player follows the volume slider, so it sounds
-  // the way the stream will.
+  // rows share.
   function soundControls(settings, preview) {
     const cooldown = el('input', {
       type: 'number',
@@ -179,38 +194,91 @@
       inputMode: 'numeric',
       title: '0 means no cooldown',
     });
-    const volume = el('input', { type: 'range', min: 0, max: 100, step: 1, value: settings.volume });
-    const volumeLabel = el('span', { class: 'volume-label' }, `${settings.volume}%`);
-    volume.addEventListener('input', () => {
-      volumeLabel.textContent = `${volume.value}%`;
-      preview.volume = volume.value / 100;
-    });
-    preview.volume = settings.volume / 100;
+    const { volume, volumeLabel, cell: volumeCell } = volumeField(settings.volume, preview);
     const cells = [
       el('label', { class: 'cell field' },
         el('span', { class: 'label' }, 'Cooldown'),
         el('span', { class: 'with-unit' }, cooldown, el('span', { class: 'unit' }, 'sec'))),
-      el('label', { class: 'cell field' },
-        el('span', { class: 'label' }, 'Volume'),
-        el('span', { class: 'with-unit' }, volume, volumeLabel)),
+      volumeCell,
     ];
     return { cooldown, volume, volumeLabel, cells };
   }
 
-  function soundRow(sound) {
+  // chanceField is how often one of a sound's files is the one that plays.
+  function chanceField(value) {
+    const chance = el('input', {
+      type: 'number',
+      min: 0,
+      max: 100,
+      step: 1,
+      value,
+      inputMode: 'numeric',
+      title: 'How often this one plays, out of the sound and its variants',
+    });
+    const cell = el('label', { class: 'cell field chance' },
+      el('span', { class: 'label' }, 'Chance'),
+      el('span', { class: 'with-unit' }, chance, el('span', { class: 'unit' }, '%')));
+    return { chance, cell };
+  }
+
+  // readChance returns a chance field's value, or null (with the saved value
+  // put back) if it isn't a whole number from 0 to 100.
+  function readChance(input, saved) {
+    const value = Number(input.value);
+    if (input.value === '' || !Number.isInteger(value) || value < 0 || value > 100) {
+      fail(new Error('The chance is a whole number, from 0 to 100'));
+      input.value = saved;
+      return null;
+    }
+    return value;
+  }
+
+  // soundGroup is a saved sound: its own row, a row per variant, and a note
+  // when the chances don't add up to 100. Adding or deleting a variant draws
+  // the group again; the other edits change it in place.
+  function soundGroup(sound) {
+    const group = el('div', { class: 'sound' });
+    const note = el('p', { class: 'chance-note', hidden: true });
+    const redraw = (s) => group.replaceWith(soundGroup(s));
+
+    function noteChances(s) {
+      const chances = [s.chance, ...s.variants.map((v) => v.chance)];
+      const total = chances.reduce((sum, c) => sum + c, 0);
+      note.hidden = !s.variants.length || total === 100;
+      if (total === 0) {
+        note.textContent = `Every chance is 0%, so !${s.name} won't play.`;
+        return;
+      }
+      const real = chances.map((c) => `${Math.round((c * 100) / total)}%`);
+      note.textContent = `These add up to ${total}%, not 100%, so they really play ${real.slice(0, -1).join(', ')} and ${real.at(-1)} of the time.`;
+    }
+
+    group.append(
+      soundRow(sound, noteChances, redraw),
+      ...sound.variants.map((v) => variantRow(sound.name, v, noteChances, redraw)),
+      note,
+    );
+    noteChances(sound);
+    return group;
+  }
+
+  function soundRow(sound, noteChances, redraw) {
     let saved = sound; // what the server last confirmed
     const row = el('div', { class: 'row' });
     const preview = el('audio', { controls: true, preload: 'none' });
     const meta = el('p', { class: 'meta' });
     const name = el('input', { class: 'name-input', spellcheck: false, autocomplete: 'off', 'aria-label': 'Command name' });
     const { cooldown, volume, volumeLabel, cells } = soundControls(sound, preview);
+    const { chance, cell: chanceCell } = chanceField(sound.chance);
     const replaceInput = el('input', { type: 'file', accept: AUDIO_ACCEPT, hidden: true });
+    const variantInput = el('input', { type: 'file', accept: AUDIO_ACCEPT, multiple: true, hidden: true });
     const path = () => `sounds/${encodeURIComponent(saved.name)}`;
 
     function show(s) {
       saved = s;
       name.value = s.name;
       cooldown.value = s.cooldown_seconds;
+      chance.value = s.chance;
       volume.value = s.volume;
       volumeLabel.textContent = `${s.volume}%`;
       preview.volume = s.volume / 100;
@@ -220,7 +288,13 @@
 
     // Edits save as soon as a field is left, so there's no Save button to forget.
     async function save(changes) {
-      const body = { name: saved.name, cooldown_seconds: saved.cooldown_seconds, volume: saved.volume, ...changes };
+      const body = {
+        name: saved.name,
+        cooldown_seconds: saved.cooldown_seconds,
+        volume: saved.volume,
+        chance: saved.chance,
+        ...changes,
+      };
       try {
         const updated = await api('PUT', path(), body);
         if (updated.name !== saved.name) {
@@ -229,6 +303,7 @@
           return;
         }
         show(updated);
+        noteChances(updated);
         flash(row);
       } catch (err) {
         show(saved);
@@ -265,6 +340,10 @@
       }
       save({ cooldown_seconds: seconds });
     });
+    chance.addEventListener('change', () => {
+      const value = readChance(chance, saved.chance);
+      if (value !== null) save({ chance: value });
+    });
     volume.addEventListener('change', () => save({ volume: Number(volume.value) }));
     replaceInput.addEventListener('change', async () => {
       const file = replaceInput.files[0];
@@ -280,11 +359,34 @@
         fail(err);
       }
     });
+    // Several files can be picked at once: each becomes the next variant.
+    variantInput.addEventListener('change', async () => {
+      const files = [...variantInput.files];
+      variantInput.value = '';
+      let updated = null;
+      try {
+        for (const file of files) {
+          const form = new FormData();
+          form.append('file', file);
+          updated = await api('POST', `${path()}/variants`, form);
+        }
+      } catch (err) {
+        fail(err);
+      }
+      if (!updated) return;
+      const added = updated.variants.filter((v) => !saved.variants.some((old) => old.id === v.id)).map((v) => v.id);
+      redraw(updated);
+      toast(`Added variant${added.length === 1 ? '' : 's'} ${added.join(', ')} to !${saved.name}`);
+    });
 
+    const files = sound.variants.length + 1;
     row.append(
       el('div', { class: 'cell name-cell' }, el('span', { class: 'bang' }, '!'), name),
       el('div', { class: 'cell audio-cell' }, preview, meta),
-      ...cells,
+      cells[0],
+      // A chance only means something once there are variants to pick between.
+      sound.variants.length ? chanceCell : el('div', { class: 'cell spacer' }),
+      cells[1],
       el('div', { class: 'cell actions' },
         el('button', { type: 'button', class: 'btn', onclick: () => replaceInput.click() }, 'Replace'),
         el('button', {
@@ -293,7 +395,13 @@
           title: 'Play it through the overlay now, ignoring the cooldown',
           onclick: () => api('POST', `${path()}/play`).then(() => toast(`Playing !${saved.name} on stream`), fail),
         }, 'Play on stream'),
-        confirmButton('Delete', 'Confirm', async () => {
+        el('button', {
+          type: 'button',
+          class: 'btn',
+          title: `More files for !${sound.name} to pick from at random (choose one or several)`,
+          onclick: () => variantInput.click(),
+        }, 'Add variant'),
+        confirmButton('Delete', files > 1 ? `Delete all ${files}?` : 'Confirm', async () => {
           try {
             renderSounds(await api('DELETE', path()));
             toast(`Deleted !${saved.name}`);
@@ -302,9 +410,96 @@
             await loadSounds();
           }
         }),
-        replaceInput),
+        replaceInput,
+        variantInput),
     );
     show(sound);
+    return row;
+  }
+
+  // variantRow is one of a sound's variants: its file, chance and volume. The
+  // cooldown is the whole sound's, so its column stays empty.
+  function variantRow(soundName, variant, noteChances, redraw) {
+    let saved = variant; // what the server last confirmed
+    const row = el('div', { class: 'row variant' });
+    const preview = el('audio', { controls: true, preload: 'none' });
+    const meta = el('p', { class: 'meta' });
+    const { chance, cell: chanceCell } = chanceField(variant.chance);
+    const { volume, volumeLabel, cell: volumeCell } = volumeField(variant.volume, preview);
+    const replaceInput = el('input', { type: 'file', accept: AUDIO_ACCEPT, hidden: true });
+    const path = () => `sounds/${encodeURIComponent(soundName)}/variants/${encodeURIComponent(saved.id)}`;
+    const mine = (s) => s.variants.find((v) => v.id === saved.id);
+
+    function show(v) {
+      saved = v;
+      chance.value = v.chance;
+      volume.value = v.volume;
+      volumeLabel.textContent = `${v.volume}%`;
+      preview.volume = v.volume / 100;
+      if (preview.getAttribute('src') !== v.url) preview.src = v.url;
+      meta.textContent = `${v.file} · ${formatSize(v.size)}`;
+    }
+
+    async function save(changes) {
+      try {
+        const updated = await api('PUT', path(), { volume: saved.volume, chance: saved.chance, ...changes });
+        show(mine(updated));
+        noteChances(updated);
+        flash(row);
+      } catch (err) {
+        show(saved);
+        fail(err);
+      }
+    }
+
+    chance.addEventListener('change', () => {
+      const value = readChance(chance, saved.chance);
+      if (value !== null) save({ chance: value });
+    });
+    volume.addEventListener('change', () => save({ volume: Number(volume.value) }));
+    replaceInput.addEventListener('change', async () => {
+      const file = replaceInput.files[0];
+      replaceInput.value = '';
+      if (!file) return;
+      const form = new FormData();
+      form.append('file', file);
+      try {
+        show(mine(await api('POST', `${path()}/file`, form)));
+        flash(row);
+        toast(`Replaced variant ${saved.id} of !${soundName}`);
+      } catch (err) {
+        fail(err);
+      }
+    });
+
+    row.append(
+      el('div', { class: 'cell name-cell variant-name' },
+        el('span', { class: 'variant-mark', 'aria-hidden': 'true' }, '↳'),
+        `Variant ${variant.id}`),
+      el('div', { class: 'cell audio-cell' }, preview, meta),
+      el('div', { class: 'cell spacer' }),
+      chanceCell,
+      volumeCell,
+      el('div', { class: 'cell actions' },
+        el('button', { type: 'button', class: 'btn', onclick: () => replaceInput.click() }, 'Replace'),
+        el('button', {
+          type: 'button',
+          class: 'btn',
+          title: 'Play this variant through the overlay now, ignoring the cooldown',
+          onclick: () => api('POST', `${path()}/play`).then(() => toast(`Playing variant ${saved.id} of !${soundName} on stream`), fail),
+        }, 'Play on stream'),
+        confirmButton('Delete', 'Confirm', async () => {
+          try {
+            redraw(await api('DELETE', path()));
+            toast(`Deleted variant ${saved.id} of !${soundName}`);
+          } catch (err) {
+            fail(err);
+            await loadSounds();
+          }
+        }),
+        replaceInput),
+    );
+    show(variant);
     return row;
   }
 

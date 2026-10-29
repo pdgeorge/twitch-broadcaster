@@ -103,6 +103,7 @@ Any chatter can type `!<name>` to play a sound through the overlay: `!buhee` pla
 - Each sound has its own cooldown, shared by everyone: once `!buhee` plays, nobody can set it off again until its cooldown runs out (5 seconds unless you change it, 0 for none). Attempts during the cooldown are ignored without a reply.
 - Each sound has a volume (0–100%), applied in the browser source. Sounds play straight away and can overlap each other and party TTS.
 - The sounds are the files in `data/sounds/` (wav, mp3 or ogg; the file name is the command), with their settings in `data/sounds/sounds.json`. Manage them from the admin page. A file copied in by hand works too, on the default settings, since the folder is read fresh on every command.
+- A sound can have variants: **Add variant** on the admin page gives `!come` more files (saved beside it as `come.2.mp3`, `come.3.mp3`, …), and each time it plays one of them at random. Each file has its own chance and volume; the cooldown is the whole command's. A new variant takes an even share of the chances and a deleted one gives its share back to the rest, so they keep adding up to 100. If your own edits leave them at some other total, they still work in proportion, and the page says what each really is. `come2.mp3`, without the dot, is a command of its own.
 - Names that a built-in command (`!roll`, `!give`, `!dabi`, …) or a `#a` command already answers can't be used.
 
 ### Admin page (`/admin`)
