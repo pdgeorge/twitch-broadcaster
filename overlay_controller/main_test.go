@@ -784,6 +784,41 @@ func TestGrantAutoRewards(t *testing.T) {
 	}
 }
 
+// The starter kit is worn by a new Dabling, but never doubles up or knocks
+// off a hat someone already wears.
+func TestGiveStarterKit(t *testing.T) {
+	cat := &cosmeticCatalog{
+		Slots: []string{"head"},
+		Items: map[string]cosmeticItem{
+			"mane":   {Slot: "head", Src: "mane.png"},
+			"tophat": {Slot: "head", Src: "hat.png"},
+		},
+	}
+
+	c := newChar("Hez", 0)
+	if !giveStarterKit(cat, c) {
+		t.Fatal("a new Dabling got nothing")
+	}
+	if !slices.Equal(c.Cosmetics, []string{"mane"}) || c.Equipped["head"] != "mane" {
+		t.Errorf("wardrobe %v, equipped %v; want the mane worn", c.Cosmetics, c.Equipped)
+	}
+	if giveStarterKit(cat, c) || len(c.Cosmetics) != 1 {
+		t.Errorf("gave the kit twice: %v", c.Cosmetics)
+	}
+
+	hatted := newChar("Ves", 0)
+	hatted.Cosmetics = []string{"tophat"}
+	hatted.Equipped = map[string]string{"head": "tophat"}
+	giveStarterKit(cat, hatted)
+	if hatted.Equipped["head"] != "tophat" || !ownsCosmetic(hatted, "mane") {
+		t.Errorf("wardrobe %v, equipped %v; want the mane owned, the hat still worn", hatted.Cosmetics, hatted.Equipped)
+	}
+
+	if giveStarterKit(&cosmeticCatalog{}, newChar("Kip", 0)) {
+		t.Error("gave a kit from a catalog without the items")
+	}
+}
+
 // Every auto reward must name an item that ships in the catalog, or it
 // silently never lands.
 func TestShippedAutoRewards(t *testing.T) {
@@ -794,6 +829,11 @@ func TestShippedAutoRewards(t *testing.T) {
 	cat, err := parseCosmeticCatalog(data)
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, name := range starterKit {
+		if _, _, ok := cat.lookup(name); !ok {
+			t.Errorf("starter kit item %q isn't in cosmetics.json", name)
+		}
 	}
 	for _, r := range autoRewards {
 		if _, _, ok := cat.lookup(r.Cosmetic); !ok {
