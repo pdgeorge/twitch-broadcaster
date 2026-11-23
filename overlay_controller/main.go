@@ -1029,6 +1029,8 @@ func speakPartyMessage(event map[string]any, messageText string, party *partyMan
 
 type characterStore struct {
 	db *sql.DB
+	// cosmetics, if set, is where a new chatter's starterKit comes from.
+	cosmetics *cosmeticCatalogStore
 }
 
 func newCharacterStore(db *sql.DB) *characterStore {
@@ -1043,7 +1045,33 @@ func (s *characterStore) init(ctx context.Context) error {
 		"alive  TINYINT(1) NOT NULL DEFAULT 1",
 		"sheet  JSON NULL",
 		"equipped JSON NULL",
+		// starter_kit is 1 once the chatter has been handed the starterKit.
+		"starter_kit TINYINT(1) NOT NULL DEFAULT 0",
 	)
+}
+
+// starterKit is what every Dabling is handed, and wears, the first time it's
+// loaded, so nobody starts out bald. They own the items like any other, so
+// a hat from the shop or an !unequip swaps them out later. Chatters from
+// before the kit existed get it on their next message, once; anything they
+// already own or a slot they already fill is left alone.
+var starterKit = []string{"mane"}
+
+// giveStarterKit hands c every starterKit item it doesn't already own,
+// wearing each one in an empty slot. It reports whether c changed.
+func giveStarterKit(cat *cosmeticCatalog, c *character) bool {
+	changed := false
+	for _, name := range starterKit {
+		if ownsCosmetic(c, name) {
+			continue
+		}
+		if _, _, err := cat.give(c, name); err != nil {
+			log.Printf("starter kit %s for %s: %v", name, c.Name, err)
+			continue
+		}
+		changed = true
+	}
+	return changed
 }
 
 func scanCharacter(row *sql.Row) (*character, error) {
@@ -1084,8 +1112,29 @@ func (s *characterStore) getOrCreate(ctx context.Context, userID, userLogin stri
 		return nil, err
 	}
 
+	// Claim the starter kit in the same step that checks for it, so two
+	// messages arriving together can't both hand it out.
+	newcomer := false
+	if s.cosmetics != nil {
+		res, err := s.db.ExecContext(ctx, "UPDATE chatters SET starter_kit = 1 WHERE twitch_chatter_id = ? AND starter_kit = 0", id)
+		if err != nil {
+			return nil, err
+		}
+		n, _ := res.RowsAffected()
+		newcomer = n == 1
+	}
+
 	row := s.db.QueryRowContext(ctx, "SELECT "+characterSelectColumns+" FROM chatters WHERE twitch_chatter_id = ?", id)
-	return scanCharacter(row)
+	c, err := scanCharacter(row)
+	if err != nil {
+		return nil, err
+	}
+	if newcomer && giveStarterKit(s.cosmetics.get(), c) {
+		if err := s.save(ctx, c); err != nil {
+			return nil, err
+		}
+	}
+	return c, nil
 }
 
 // getByName looks up a character by chatter name (case-insensitive), for DM
@@ -1780,6 +1829,7 @@ func main() {
 		cosmetics.starterPath = starterCatalog
 	}
 	cosmetics.get() // load now so a bad catalog shows up in the startup log
+	characters.cosmetics = cosmetics
 
 	hub := newOverlayHub()
 	other := newOtherManager(hub)
