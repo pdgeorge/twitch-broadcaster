@@ -36,6 +36,71 @@ Open decisions: trial cadence (rare = better, it's a ceremony), whether chat can
 
 ---
 
+## YES: Dabling breaks — Derby first, then Expedition
+
+**Status: committed to (2026-11-23). Derby first; it also builds the shared intermission frame the Expedition reuses.**
+
+Mid-stream breaks of 3–5 minutes where chat's Dablings do the playing and chat watches, cheers and pokes at it. Dabi and the Dablings are the cast, not the LLM: nothing here needs Dabi's model, though he can host (see "Dabi's part").
+
+The two games reward different people on purpose:
+
+- **Derby is for everyone.** Mostly luck, with catch-up for the back of the pack, so someone who chatted for the first time ten minutes ago can win. Level barely matters.
+- **Expedition is for the regulars.** Level decides how deep a Dabling gets, so long-time chatters feel their exp pay off.
+
+If level drove both, the same few people would win everything and new viewers would stop joining.
+
+### The intermission frame (built with the Derby, shared by both)
+
+Same shape as Dabi's shop, which already proved it: a broadcaster command switches the OBS scene and the music through pd-streamdeck, a browser source draws the scene, the controller owns the state, and closing puts back what was on before.
+
+1. **Start (broadcaster only)**: `!race` or `!dungeon`. Scene and music switch, chat is told how to join.
+2. **Join window (~60 s)**: anyone with a Dabling types `!join`. Free, so everyone plays. The scene shows Dablings lining up as they join.
+3. **Run**: the controller simulates the whole thing in Go from the `chatters` rows (deterministic from a seed, so a run can be replayed or tested), and streams it to the browser source over the overlay websocket as a timeline the page plays back as a cartoon. Chat's inputs (boosts, votes) feed into the simulation while it runs.
+4. **Results card**: placings, who got what, then payouts are written to the `chatters` row.
+5. **Back**: scene and music return to whatever was on.
+
+Rendering reuses what the tavern floor already draws: tinted Dablings wearing their equipped cosmetics, growing with level.
+
+### Dabling Derby
+
+Dablings in little cars, driving laps.
+
+- **Look**: one car sprite with the Dabling sat in it, wearing its hat and tint, so it reads even with 30 racers. Side view or top-down track, whichever reads better at that count.
+- **Race**: a fixed number of laps. Each car's speed wobbles at random, with small events (spin-outs, a shortcut, a pit stop), and cars at the back get a little catch-up so the race stays open until the end.
+- **`!boost`**: a racer types it to get a small burst of speed. Limited (e.g. a few per race, with a cooldown) so spamming doesn't win, but typing at the right moment helps. Shows as a puff on screen so chat sees it happen.
+- **Rewards**: everyone who finishes gets a participation reward, placings get a bit more (see "Rewards").
+
+### Dabling Expedition
+
+Dablings go on a dungeon crawl, fight enemies and pick up loot on the way. The higher a Dabling's level, the further it's likely to get.
+
+- **Paths by vote**: at forks chat votes which way the party goes (left door / right door, the bridge or the cave). A quick in-chat vote (`!1` / `!2` for 15 s) rather than a Twitch poll, so it stays fast.
+- **Level**: a Dabling's level sets how much it can take. Higher levels go deeper, lower ones drop out earlier but still get something.
+- **Getting knocked out ends the run, not the character**: separate from Echoes of Chat's HP, death and `!revive`. A break should be fun, not cost anyone progress.
+- **Loot**: what you find depends on how deep you got and the path chat picked.
+- Roles/classes from the D&D side could plug in later (fighters in front, clerics keeping others up), but that's paused, so the Expedition works on level alone.
+
+### Rewards
+
+- **Participation cosmetics** from both: everyone who joins gets something, so showing up is what counts.
+- **Dated or event-marked items** ("Derby, Dec 2026", "Reached floor 5") so they become a record of having been there.
+- **Kept apart from the shop's stock** (event-only items, or a trophy/badge slot) so drops don't undercut what Dabi sells.
+- Gold can come out of these too, once there's something to spend it on.
+
+### Dabi's part (optional, no model needed)
+
+Dabi hosts: race marshal on a stool by the finish line, or quest-giver at the dungeon door, using `dabi.body` the way the shop does. Canned lines work. An LLM line at the start or the end is optional, since his ~10–15 s reply time only matters mid-run.
+
+### Open decisions
+
+- `!boost` free with a limit, or costing gold? Gold only comes from `!give` today, so free-with-a-limit is the likely start.
+- How many laps / how long a race runs, and how often a break happens (rare enough to feel like an event).
+- Side view or top-down track for the Derby.
+- Which cosmetics to make for the first Derby, and whether there's a trophy slot or they use the existing slots.
+- Whether chat can bet on the Derby, once gold has a use.
+
+---
+
 ## MAYBE: Tavern Keeper
 
 An NPC who *knows* the regulars, because the DB already does: `chatters` has level, logins, deaths, cosmetics — and once chat logging lands, what they talk about.
